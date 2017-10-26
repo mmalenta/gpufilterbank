@@ -1,5 +1,5 @@
-#ifndef _H_PAFRB_ERRORS
-#define _H_PAFRB_ERRORS
+#ifndef _H_VDIFIL_ERRORS
+#define _H_VDIFIL_ERRORS
 
 #include <iostream>
 
