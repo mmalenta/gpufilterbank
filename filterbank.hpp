@@ -3,6 +3,7 @@
 
 #include <cstdlib>
 #include <fstream>
+#include <iostream>
 #include <sstream>
 #include <string>
 
@@ -42,7 +43,7 @@ inline void ReadFilterbankHeader(std::string config, FilHead &head) {
             std::istringstream ossline(line);
             ossline >> paraname >> paravalue;
 
-            if (paraname == "RAwFILE") {
+            if (paraname == "RAWFILE") {
                 head.rawfile = paravalue;
             } else if (paraname == "SOURCE") {
                 head.source = paravalue;
@@ -50,7 +51,7 @@ inline void ReadFilterbankHeader(std::string config, FilHead &head) {
                 head.az = (double)std::stof(paravalue);
             } else if (paraname == "DEC") {
                 head.dec = (double)std::stof(paravalue);
-            } else if (paraname == "FCH1") {
+            } else if (paraname == "FCENT") {
                 head.fch1 = (double)std::stof(paravalue);
             } else if (paraname == "FOFF") {
                 head.foff = (double)std::stof(paravalue);
@@ -80,6 +81,8 @@ inline void ReadFilterbankHeader(std::string config, FilHead &head) {
                 head.nifs = (int)std::stoi(paravalue);
             } else if (paraname == "TELESCOPEID") {
                 head.telescopeid = (int)std::stoi(paravalue);
+            } else {
+                std::cerr << "Unrecognised option " << paravalue << std::endl;
             }
         }
     }

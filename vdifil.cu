@@ -1,3 +1,5 @@
+#include <chrono>
+#include <iomanip>
 #include <iostream>
 #include <fstream>
 #include <string>
@@ -6,10 +8,16 @@
 
 #include <cuda.h>
 #include <cufft.h>
+#include <thrust/device_vector.h>
+#include <thrust/fill.h>
+#include <thrust/host_vector.h>
+#include <thrust/sequence.h>
+#include <thrust/transform.h>
 
 #include "filterbank.hpp"
 #include "errors.hpp"
 
+using std::cerr;
 using std::cout;
 using std::endl;
 using std::ifstream;
@@ -18,21 +26,35 @@ using std::string;
 using std::vector;
 
 #define DEBUG 1
-#define GPURUN 0
+#define GPURUN 1
 #define NACCUMULATE 4000
 #define NPOL 2
 #define PERBLOCK 625
-#define TIMEAVG 8
+#define TIMEAVG 16 
 #define TIMESCALE 0.125
 #define UNPACKFACTOR 4
 #define VDIFSIZE 8000
-#define FFTOUT 513
-#define FFTUSE 512
+#define FFTOUT 257
+#define FFTUSE 256
 
 struct FrameInfo {
     unsigned int frameno;
     unsigned int refsecond;
     unsigned int refepoch;
+};
+
+struct Timing {
+    float readtime;
+    float scaletime;
+    float filtime;
+    float savetime;
+    float totaltime;
+};
+
+struct FactorFunctor {
+    __host__ __device__ float operator()(float val) {
+        return val != 0 ? 1.0f/val : val;
+    }
 };
 
 __constant__ unsigned char kMask[] = {0x03, 0x0C, 0x30, 0xC0};
@@ -69,9 +91,9 @@ __global__ void UnpackKernel(unsigned char **in, float **out, size_t samples) {
 
 // NOTE: Does not do any frequency averaging
 // NOTE: Outputs only the total intensity and no other Stokes parameters
-__global__ void PowerKernel(cufftComplex **in, float *out) {
-    unsigned int filidx;
-    unsigned int outidx;
+// NOTE: PERBLOCK is the number of output samples per block
+__global__ void DetectKernel(cufftComplex** __restrict__ in, float* __restrict__ out) {
+    int outidx = blockIdx.x * PERBLOCK * FFTUSE + FFTUSE - threadIdx.x - 1;
     int inidx = blockIdx.x * PERBLOCK * TIMEAVG * FFTOUT + threadIdx.x + 1;
 
     float outvalue = 0.0f;
@@ -81,21 +103,93 @@ __global__ void PowerKernel(cufftComplex **in, float *out) {
 
         // NOTE: Read the data from the incoming array
         for (int ipol = 0; ipol < 2; ++ipol) {
-            for (int iavg = 0; iavg < TIMEAVG; iavg++) {
+            for (int iavg = 0; iavg < TIMEAVG; ++iavg) {
                 polval = in[ipol][inidx + iavg * FFTOUT];
                 outvalue += polval.x * polval.x + polval.y * polval.y;
             }
 
         }
-
-        outidx = filidx * FFTUSE + threadIdx.x;
-
         outvalue *= TIMESCALE;
-
         out[outidx] = outvalue;
-        inidx += FFTOUT * TIMEAVG;;
+        inidx += FFTOUT * TIMEAVG;
+        outidx += FFTUSE;
         outvalue = 0.0;
     }
+}
+
+__global__ void DetectScaleKernel(cufftComplex** __restrict__ in, unsigned char* __restrict__ out, float* __restrict__ means, float* __restrict__ stdevs) {
+    int outidx = blockIdx.x * PERBLOCK * FFTUSE + FFTUSE - threadIdx.x - 1;
+    int inidx = blockIdx.x * PERBLOCK * TIMEAVG * FFTOUT + threadIdx.x + 1;
+
+    float outvalue = 0.0f;
+    cufftComplex polval;
+
+    int scaled = 0;
+
+    for (int isamp = 0; isamp < PERBLOCK; ++isamp) {
+
+        // NOTE: Read the data from the incoming array
+        for (int ipol = 0; ipol < 2; ++ipol) {
+            for (int iavg = 0; iavg < TIMEAVG; ++iavg) {
+                polval = in[ipol][inidx + iavg * FFTOUT];
+                outvalue += polval.x * polval.x + polval.y * polval.y;
+            }
+
+        }
+        outvalue *= TIMESCALE;
+        scaled = __float2int_ru((outvalue - means[FFTUSE - threadIdx.x - 1]) / stdevs[FFTUSE - threadIdx.x - 1] * 32.0f + 128.0f);
+        if (scaled > 255) {
+            scaled = 255;
+        } else if (scaled < 0) {
+            scaled = 0;
+        }
+        out[outidx] = (unsigned char)scaled;
+        inidx += FFTOUT * TIMEAVG;
+        outidx += FFTUSE;
+        outvalue = 0.0;
+    }
+}
+
+__global__ void InitDivFactors(float *factors, size_t togenerate) {
+
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    // NOTE: I don't want to be dividing by 0
+    // NOTE: idx of 0 will not be used anyway
+    if (idx < togenerate) {
+        if (idx != 0) {
+            factors[idx] = 1.0f / idx;
+        } else {
+            factors[idx] = idx;
+        }
+    }
+}
+
+__global__ void GetScalingFactorsKernel(float* __restrict__ indata, float *base, float *stdev, float *factors, int processed) {
+
+    // NOTE: Filterbank file format coming in
+    //float mean = indata[threadIdx.x];
+    float mean = 0.0f;
+    // NOTE: Depending whether I save STD or VAR at the end of every run
+    // float estd = stdev[threadIdx.x];
+    float estd = stdev[threadIdx.x] * stdev[threadIdx.x] * (processed - 1.0f);
+    float oldmean = base[threadIdx.x];
+
+    //float estd = 0.0f;
+    //float oldmean = 0.0;
+
+    float val = 0.0f;
+    float diff = 0.0;
+    // NOTE: There are 15625 output time samples per NACCUMULATE frames
+    for (int isamp = 0; isamp < 15625; ++isamp) {
+        val = indata[isamp * FFTUSE + threadIdx.x];
+        diff = val - oldmean;
+        mean = oldmean + diff * factors[processed + isamp + 1];
+        estd += diff * (val - mean);
+        oldmean = mean;
+    }
+    base[threadIdx.x] = mean;
+    stdev[threadIdx.x] = sqrtf(estd / (float)(processed + 15625 - 1.0f));
+    // stdev[threadIdx.x] = estd;
 }
 
 int main(int argc, char *argv[]) {
@@ -106,9 +200,48 @@ int main(int argc, char *argv[]) {
     inpolb = std::string(argv[2]);
     outfil = std::string(argv[3]);
     config = std::string(argv[4]);
+   
+    bool scaling = false;
+
+    if (argc == 6) {
+        if (std::string(argv[5]) == "-s") {
+            cout << "Will scale the data to 8 bits" << endl;
+            scaling = true;
+        }
+    }
+
+    cout << inpola << " " << inpolb << endl;
 
     FilHead filhead;
     ReadFilterbankHeader(config, filhead);
+    
+    if (scaling) {
+        filhead.nbits = 8;
+    }
+
+    // TODO: This will be wrong for R2C FFT
+    filhead.tsamp = 1.0 / (2.0 * filhead.foff) * 2 * FFTUSE * TIMEAVG;
+    // TODO: Make sure it is the middle of the top frequency channel
+    filhead.fch1 = (filhead.fch1 + filhead.foff / 2.0f) * 1e-06;
+    filhead.nchans = FFTUSE;
+    filhead.foff = -1.0 * filhead.foff / FFTUSE * 1e-06 ;
+
+    filhead.fch1 = filhead.fch1 + filhead.foff / 2.0;
+
+    if (DEBUG) {
+        cout << "Some header info:\n"
+                << "Raw file: " << filhead.rawfile << endl
+                << "Source name: " << filhead.source << endl
+                << "Azimuth: " << filhead.az << endl
+                << "Zenith angle: " << filhead.za << endl
+                << "Declination: " << filhead.dec << endl
+                << "Right ascension: " << filhead.ra << endl
+                << "Top channel frequency: " << filhead.fch1 << endl
+                << "Channel bandwidth: " << filhead.foff << endl
+                << "Number of channels: " << filhead.nchans << endl
+                << "Sampling time: " << filhead.tsamp << endl
+                << "Bits per sample: " << filhead.nbits << endl;
+    }
 
     // TODO: Make sure there are correct values for bandwidth and sampling time in the header after taking averaging into account
 
@@ -116,6 +249,15 @@ int main(int argc, char *argv[]) {
     ifstream filepolb(inpolb.c_str(), ifstream::in | ifstream::binary);
     ofstream filfile(outfil.c_str(), ofstream::out | ofstream::binary);
 
+    if (!filepola || !filepolb) {
+	if (!filepola) {
+            cout << "Could not open file " << inpola << endl;
+        }
+        if (!filepolb) {
+            cout << "Could not open file " << inpolb << endl;
+        }
+        exit(EXIT_FAILURE);
+    }
     // TODO: Can save the filterbank header straight away, after the first header is read
     unsigned char vdifheadpola[32];
     unsigned char vdifheadpolb[32];
@@ -123,15 +265,17 @@ int main(int argc, char *argv[]) {
     filepolb.read(reinterpret_cast<char*>(vdifheadpolb), 32);
 
     filepola.seekg(0, filepola.end);
-    unsigned int filelengtha = filepola.tellg();
+    long long filelengtha = filepola.tellg();
     filepola.seekg(0, filepola.beg);
 
     filepolb.seekg(0, filepolb.end);
-    unsigned int filelengthb = filepolb.tellg();
+    long long filelengthb = filepolb.tellg();
     filepolb.seekg(0, filepolb.beg);
 
     unsigned int startframe;
     unsigned int startsecond;
+
+    cout << filelengtha << " " << filelengthb << endl;
 
     startframe = (unsigned int)(vdifheadpola[4] | (vdifheadpola[5] << 8) | (vdifheadpola[6] << 16));	// frame number in this second
     startsecond = (unsigned int)(vdifheadpola[0] | (vdifheadpola[1] << 8) | (vdifheadpola[2] << 16) | ((vdifheadpola[3] & 0x3f) << 24));
@@ -144,8 +288,8 @@ int main(int argc, char *argv[]) {
     unsigned int toread = NACCUMULATE * 8000;
     // NOTE: No more headers after unpacking
     unsigned int unpackedsize = NACCUMULATE * VDIFSIZE * UNPACKFACTOR;
-    unsigned int fftedsize = unpackedsize / 1024 * FFTOUT;
-    unsigned int powersize = fftedsize / TIMEAVG;
+    unsigned int fftedsize = unpackedsize / (2 * FFTUSE) * FFTOUT;
+    unsigned int powersize = unpackedsize / (2 * FFTUSE) * FFTUSE / TIMEAVG;
 
     cufftHandle fftplan;
     int fftsizes[1];
@@ -165,8 +309,9 @@ int main(int argc, char *argv[]) {
     float **devunpacked;
     cufftComplex **ffted = new cufftComplex*[NPOL];
     cufftComplex **devffted;
-    float *devpower;
-    float *tmppower = new float[powersize];
+    
+    unsigned char *devpower;
+    unsigned char *tmppower = new unsigned char[powersize * filhead.nbits / 8];
 
     if (GPURUN) {
         cudaCheckError(cudaMalloc((void**)&devpola, toread * sizeof(unsigned char)));
@@ -187,7 +332,7 @@ int main(int argc, char *argv[]) {
         cudaCheckError(cudaMalloc((void**)&ffted[1], fftedsize * sizeof(cufftComplex)));
         cudaCheckError(cudaMemcpy(devffted, ffted, NPOL * sizeof(cufftComplex*), cudaMemcpyHostToDevice));
 
-        cudaCheckError(cudaMalloc((void**)&devpower, powersize * sizeof(float)));
+        cudaCheckError(cudaMalloc((void**)&devpower, powersize * (filhead.nbits / 8)));
     }
 
     vector<std::pair<FrameInfo, FrameInfo>> vdifframes;
@@ -198,15 +343,128 @@ int main(int argc, char *argv[]) {
     int epoch;
 
     WriteFilterbankHeader(filfile, filhead);
+   
+    Timing runtimes;
+    runtimes.readtime = 0.0f;
+    runtimes.scaletime = 0.0f;
+    runtimes.filtime = 0.0f;
+    runtimes.savetime = 0.0f;
+    runtimes.totaltime = 0.0f;
+
+    std::chrono::time_point<std::chrono::steady_clock> readstart, readend, scalestart, scaleend, filstart, filend, savestart, saveend;
+
+    float *tmpunpackeda = new float[2 * 8000 * 4];
+    float *tmpunpackedb = new float[2 * 8000 * 4];
+    bool saved = false;
+
+    //float *dmeans;
+    //float *dstdevs;
+    //cudaCheckError(cudaMalloc((void**)&dmeans, FFTUSE * sizeof(float)));
+    //cudaCheckError(cudaMalloc((void**)&dstdevs, FFTUSE * sizeof(float)));
+
+    thrust::device_vector<float> dmeans, dstdevs;
+    dmeans.resize(FFTUSE);
+    dstdevs.resize(FFTUSE);
+    thrust::fill(dmeans.begin(), dmeans.end(), 0.0f);
+    thrust::fill(dstdevs.begin(), dstdevs.end(), 0.0f);
+    float *pdmeans = thrust::raw_pointer_cast(dmeans.data());
+    float *pdstdevs = thrust::raw_pointer_cast(dstdevs.data());    
+
+    cout << "Size of the device vectors: " << dmeans.size() << " " << dstdevs.size() << endl;
+
+    scalestart = std::chrono::steady_clock::now();
+
+    // NOTE: Use first 5 accumulates of data to obtain scaling factors
+    if (scaling) {
+
+        size_t divfactors = 5 * powersize / FFTUSE;
+        thrust::device_vector<float> dfactors; 
+        dfactors.resize(divfactors + 1);
+        thrust::sequence(dfactors.begin(), dfactors.end());
+        thrust::transform(dfactors.begin(), dfactors.end(), dfactors.begin(), FactorFunctor());
+        float *pdfactors = thrust::raw_pointer_cast(dfactors.data());
+
+        //float *dfactors;
+        //size_t divfactors = 5 * powersize / FFTUSE;
+        //cudaCheckError(cudaMalloc((void**)&dfactors, divfactors * sizeof(float)));
+        //int scalethreads = 1024;
+        //int scaleblocks = (divfactors - 1) / scalethreads + 1;
+        //cout << "Div factors blocks: " << scaleblocks << " and threads: " << scalethreads << endl;
+        //InitDivFactors<<<scaleblocks, scalethreads>>>(dfactors, divfactors);
+        //cudaCheckError(cudaDeviceSynchronize());
+        //cudaCheckError(cudaGetLastError());
+        size_t processed = 0;
+
+        float *tmpdpower;
+        cudaCheckError(cudaMalloc((void**)&tmpdpower, powersize * sizeof(float)));
+
+	while((filepola.tellg() < (5 * NACCUMULATE * 8032)) && (filepolb.tellg() < (5 * NACCUMULATE * 8032))) {
+            for (int iacc = 0; iacc < NACCUMULATE; ++iacc) {
+                filepola.read(reinterpret_cast<char*>(vdifheadpola), 32);
+                filepolb.read(reinterpret_cast<char*>(vdifheadpolb), 32);
+                filepola.read(reinterpret_cast<char*>(tmppola) + iacc * 8000, 8000);
+                filepolb.read(reinterpret_cast<char*>(tmppolb) + iacc * 8000, 8000);
+            }
+
+            cudaCheckError(cudaMemcpy(datapol[0], tmppola, NACCUMULATE * 8000 * sizeof(unsigned char), cudaMemcpyHostToDevice));
+            cudaCheckError(cudaMemcpy(datapol[1], tmppolb, NACCUMULATE * 8000 * sizeof(unsigned char), cudaMemcpyHostToDevice));
+
+            UnpackKernel<<<50, 1024, 0, 0>>>(devpol, devunpacked, toread);
+            for (int ipol = 0; ipol < NPOL; ++ipol) {
+                cufftCheckError(cufftExecR2C(fftplan, unpacked[ipol], ffted[ipol]));
+            }
+            DetectKernel<<<25, FFTUSE, 0, 0>>>(devffted, tmpdpower);
+            cudaCheckError(cudaDeviceSynchronize());
+            GetScalingFactorsKernel<<<1, FFTUSE, 0, 0>>>(tmpdpower, pdmeans, pdstdevs, pdfactors, processed);
+            processed += (powersize / FFTUSE);
+            cudaCheckError(cudaDeviceSynchronize());
+        }
+
+        //float *hmeans = new float[FFTUSE];
+        //float *hstdevs = new float[FFTUSE];
+
+        //cudaCheckError(cudaMemcpy(hmeans, dmeans, FFTUSE * sizeof(float), cudaMemcpyDeviceToHost));
+        //cudaCheckError(cudaMemcpy(hstdevs, dstdevs, FFTUSE * sizeof(float), cudaMemcpyDeviceToHost));
+
+        thrust::host_vector<float> hmeans = dmeans;
+        thrust::host_vector<float> hstdevs = dstdevs;
+
+        std::ofstream statsfile("mean_stdev.dat");
+
+        cout << "Size of host vector:" << hmeans.size() << endl;
+ 
+        if (statsfile) {
+            for (int ichan = 0; ichan < hmeans.size(); ++ichan) {
+                statsfile << hmeans[ichan] << " " << hstdevs[ichan] << endl;
+            }
+        } else {
+            cerr << "Could not open the stats file" << endl;
+        }
+
+        statsfile.close();
+
+        cudaFree(tmpdpower);
+         
+    }
+
+    scaleend = std::chrono::steady_clock::now();
+
+    runtimes.scaletime = std::chrono::duration<float>(scaleend - scalestart).count();
+
+    filepola.seekg(0, filepola.beg);
+    filepolb.seekg(0, filepolb.beg);
 
     while((filepola.tellg() < (filelengtha - NACCUMULATE * 8000)) && (filepolb.tellg() < (filelengthb - NACCUMULATE * 8000))) {
         //cout << filepola.tellg() << endl;
         // NOTE: This implementation
         for (int iacc = 0; iacc < NACCUMULATE; ++iacc) {
+	    readstart = std::chrono::steady_clock::now();
             filepola.read(reinterpret_cast<char*>(vdifheadpola), 32);
             filepolb.read(reinterpret_cast<char*>(vdifheadpolb), 32);
             filepola.read(reinterpret_cast<char*>(tmppola) + iacc * 8000, 8000);
             filepolb.read(reinterpret_cast<char*>(tmppolb) + iacc * 8000, 8000);
+            readend = std::chrono::steady_clock::now();
+            runtimes.readtime += std::chrono::duration<float>(readend - readstart).count();
 
             refsecond = (unsigned int)(vdifheadpola[0] | (vdifheadpola[1] << 8) | (vdifheadpola[2] << 16) | ((vdifheadpola[3] & 0x3f) << 24));
             frameno = (unsigned int)(vdifheadpola[4] | (vdifheadpola[5] << 8) | (vdifheadpola[6] << 16));
@@ -231,26 +489,65 @@ int main(int argc, char *argv[]) {
             // NOTE: Can use subtract startframe to put frame count at 0 and use that to save into the buffer
 
         }
-
-        if (GPURUN) {
-            cudaCheckError(cudaMemcpy(datapol[0], tmppola, toread * sizeof(unsigned char), cudaMemcpyHostToDevice));
-            cudaCheckError(cudaMemcpy(datapol[1], tmppolb, toread * sizeof(unsigned char), cudaMemcpyHostToDevice));
+ 
+       if (GPURUN) {
+            filstart = std::chrono::steady_clock::now();
+            cudaCheckError(cudaMemcpy(datapol[0], tmppola, NACCUMULATE * 8000 * sizeof(unsigned char), cudaMemcpyHostToDevice));
+            cudaCheckError(cudaMemcpy(datapol[1], tmppolb, NACCUMULATE * 8000 * sizeof(unsigned char), cudaMemcpyHostToDevice));
 
             UnpackKernel<<<50, 1024, 0, 0>>>(devpol, devunpacked, toread);
             for (int ipol = 0; ipol < NPOL; ++ipol) {
                 cufftCheckError(cufftExecR2C(fftplan, unpacked[ipol], ffted[ipol]));
             }
-            PowerKernel<<<25, 512, 0, 0>>>(devffted, devpower);
-            cudaCheckError(cudaMemcpy(devpower, tmppower, powersize * sizeof(float), cudaMemcpyDeviceToHost));
 
-            filfile.write(reinterpret_cast<char*>(tmppower), powersize * sizeof(float));
+            if (filhead.nbits == 8) {
+                DetectScaleKernel<<<25, FFTUSE, 0, 0>>>(devffted, reinterpret_cast<unsigned char*>(devpower), pdmeans, pdstdevs);
+            } else if (filhead.nbits == 32) {
+                DetectKernel<<<25, FFTUSE, 0, 0>>>(devffted, reinterpret_cast<float*>(devpower));
+            } else {
+                cerr << "Unsupported option! Will use float!" << endl;
+                DetectKernel<<<25, FFTUSE, 0, 0>>>(devffted, reinterpret_cast<float*>(devpower));
+            }
+
+            //PowerKernel<<<25, FFTUSE, 0, 0>>>(devffted, devpower);
+            cudaCheckError(cudaDeviceSynchronize());
+            cudaCheckError(cudaMemcpy(tmppower, devpower, powersize * filhead.nbits / 8, cudaMemcpyDeviceToHost));
+            
+            if (!saved) {
+                std::ofstream unpackedfile("unpacked.dat");
+		cudaCheckError(cudaMemcpy(tmpunpackeda, unpacked[0], 2 * 8000 * 4 * sizeof(float), cudaMemcpyDeviceToHost));
+		cudaCheckError(cudaMemcpy(tmpunpackedb, unpacked[1], 2 * 8000 * 4 * sizeof(float), cudaMemcpyDeviceToHost));
+		for (int isamp = 0; isamp < 2 * 8000 * 4; ++isamp) {
+                    unpackedfile << tmpunpackeda[isamp] << " " << tmpunpackedb[isamp] << endl;
+                }
+                unpackedfile.close();
+                delete [] tmpunpackeda;
+                delete [] tmpunpackedb;
+                saved = true;
+            }
+
+            filend = std::chrono::steady_clock::now();
+            runtimes.filtime += std::chrono::duration<float>(filend - filstart).count();
+            
+            savestart = std::chrono::steady_clock::now(); 
+            filfile.write(reinterpret_cast<char*>(tmppower), powersize * filhead.nbits / 8);
+            saveend = std::chrono::steady_clock::now();
+            runtimes.savetime += std::chrono::duration<float>(saveend - savestart).count();
         }
-        cout << "Completed " << (float)filepola.tellg() / (float)filelengtha * 100.0f << "%\r";
+        cout << "Completed " << std::fixed << std::setprecision(2) << (float)filepola.tellg() / (float)(filelengtha - 1.0) * 100.0f << "%\r";
         cout.flush();
     }
 
     cout << endl;
     filfile.close();
+
+    runtimes.totaltime = runtimes.readtime + runtimes.scaletime + runtimes.filtime + runtimes.savetime;
+
+    cout << "Total execution time: " << runtimes.totaltime << "s\n";
+    cout << "\tScaling factors: " << runtimes.scaletime << "s\n";
+    cout << "\tFile read: " << runtimes.readtime << "s\n";
+    cout << "\tFilterbanking: " << runtimes.filtime << "s\n";
+    cout << "\tFile write: " << runtimes.savetime << "s\n";
 
     if (DEBUG) {
         std::ofstream outframes("dataframes.dat");
