@@ -48,23 +48,23 @@ inline void ReadFilterbankHeader(std::string config, FilHead &head) {
             } else if (paraname == "SOURCE") {
                 head.source = paravalue;
             } else if (paraname == "AZ") {
-                head.az = (double)std::stof(paravalue);
+                head.az = (double)std::stod(paravalue);
             } else if (paraname == "DEC") {
-                head.dec = (double)std::stof(paravalue);
+                head.dec = (double)std::stod(paravalue);
             } else if (paraname == "FCENT") {
-                head.fch1 = (double)std::stof(paravalue);
+                head.fch1 = (double)std::stod(paravalue);
             } else if (paraname == "FOFF") {
-                head.foff = (double)std::stof(paravalue);
+                head.foff = (double)std::stod(paravalue);
             } else if (paraname == "RA") {
-                head.ra = (double)std::stof(paravalue);
+                head.ra = (double)std::stod(paravalue);
             } else if (paraname == "REFDM") {
-                head.rdm = (double)std::stof(paravalue);
+                head.rdm = (double)std::stod(paravalue);
             } else if (paraname == "TSAMP") {
-                head.tsamp = (double)std::stof(paravalue);
+                head.tsamp = (double)std::stod(paravalue);
             } else if (paraname == "TSTART") {
-                head.tstart = (double)std::stof(paravalue);
+                head.tstart = (double)std::stod(paravalue);
             } else if (paraname == "ZA") {
-                head.za = (double)std::stof(paravalue);
+                head.za = (double)std::stod(paravalue);
             } else if (paraname == "DATATYPE") {
                 head.datatype = (int)std::stoi(paravalue);
             } else if (paraname == "BEAMNO") {
@@ -185,10 +185,10 @@ inline void WriteFilterbankHeader(std::ofstream &outfile, FilHead &head) {
     outfile.write((char*)&head.nbits, sizeof(int));
 
     // reference dm - not really sure what it does
-    outfile.write((char*)&length, sizeof(int));
-    strcpy(field, "refdm");
-    outfile.write(field, length * sizeof(char));
-    outfile.write((char*)&head.rdm, sizeof(double));
+    //outfile.write((char*)&length, sizeof(int));
+    //strcpy(field, "refdm");
+    //outfile.write(field, length * sizeof(char));
+    //outfile.write((char*)&head.rdm, sizeof(double));
 
     outfile.write((char*)&length, sizeof(int));
     strcpy(field, "ibeam");

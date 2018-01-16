@@ -296,7 +296,7 @@ int main(int argc, char *argv[]) {
     fftsizes[0] = 2 * FFTUSE;
     int fftbatchsize = unpackedsize / fftsizes[0];
     cout << fftbatchsize << endl;
-    cufftCheckError(cufftPlanMany(&fftplan, 1, fftsizes, NULL, 1, 512, NULL, 1, 512, CUFFT_R2C, fftbatchsize));
+    cufftCheckError(cufftPlanMany(&fftplan, 1, fftsizes, NULL, 1, FFTUSE, NULL, 1, FFTUSE, CUFFT_R2C, fftbatchsize));
 
     unsigned char *tmppola = new unsigned char[toread];
     unsigned char *tmppolb = new unsigned char[toread];
