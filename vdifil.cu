@@ -25,7 +25,7 @@ using std::ofstream;
 using std::string;
 using std::vector;
 
-#define DEBUG 1
+#define DEBUG 0
 #define GPURUN 1
 #define NACCUMULATE 4000
 #define NPOL 2
@@ -49,6 +49,7 @@ struct Timing {
     float filtime;
     float savetime;
     float totaltime;
+    float intertime;
 };
 
 struct FactorFunctor {
@@ -195,22 +196,50 @@ __global__ void GetScalingFactorsKernel(float* __restrict__ indata, float *base,
 int main(int argc, char *argv[]) {
 
     string inpola, inpolb, outfil, config;
-
-    inpola = std::string(argv[1]);
-    inpolb = std::string(argv[2]);
-    outfil = std::string(argv[3]);
-    config = std::string(argv[4]);
-   
+    double readsec; 
     bool scaling = false;
+    bool saveinter = false;
 
-    if (argc == 6) {
-        if (std::string(argv[5]) == "-s") {
+    if ((argc < 5) || (argv[1] == "-h") || (argv[1] == "--help")) {
+        cout << "Incorrect number of arguments!" << endl;
+        cout << "Command line options:" << endl
+                << "-a <filename> - input file for polarisation a" << endl
+                << "-b <filename> - input file for polarisation b" << endl
+                << "-o <filename> - output filterbank file" << endl
+                << "-c <filename> - input configuration file" << endl
+                << "-r <number> - number of seconds to process - CURRENTLY NOT WORKING" << endl
+                << "-s - enable scaling from 32 bits to 8 bits" << endl
+                << "-i - enable saving the intermediate data products" << endl
+                << "-h, --help - display this message" << endl;
+        exit(EXIT_SUCCESS);
+    }
+
+    for (int iarg = 0; iarg < argc; ++iarg) {
+        if (std::string(argv[iarg]) == "-a") {
+            iarg++;
+            inpola = std::string(argv[iarg]);
+        } else if (std::string(argv[iarg]) == "-b") {
+            iarg++;
+            inpolb = std::string(argv[iarg]);
+        } else if (std::string(argv[iarg]) == "-o") {
+            iarg++;
+            outfil = std::string(argv[iarg]);
+        } else if (std::string(argv[iarg]) == "-c") {
+            iarg++;
+            config = std::string(argv[iarg]);
+        } else if (std::string(argv[iarg]) == "-s") {
             cout << "Will scale the data to 8 bits" << endl;
             scaling = true;
+        } else if (std::string(argv[iarg]) == "-i") {
+            cout << "Will save the intermediate products" << endl;
+            saveinter = true;
+        } else if (std::string(argv[iarg]) == "-r") {
+            iarg++;
+            readsec = std::stod(argv[iarg]);
         }
     }
 
-    cout << inpola << " " << inpolb << endl;
+    cout << "Input files: " << inpola << " " << inpolb << endl;
 
     FilHead filhead;
     ReadFilterbankHeader(config, filhead);
@@ -350,11 +379,15 @@ int main(int argc, char *argv[]) {
     runtimes.filtime = 0.0f;
     runtimes.savetime = 0.0f;
     runtimes.totaltime = 0.0f;
+    runtimes.intertime = 0.0f;
 
-    std::chrono::time_point<std::chrono::steady_clock> readstart, readend, scalestart, scaleend, filstart, filend, savestart, saveend;
+    std::chrono::time_point<std::chrono::steady_clock> readstart, readend, scalestart, scaleend, filstart, filend, savestart, saveend, interstart, interend;
 
-    float *tmpunpackeda = new float[2 * 8000 * 4];
-    float *tmpunpackedb = new float[2 * 8000 * 4];
+    float *tmpunpackeda = new float[unpackedsize];
+    float *tmpunpackedb = new float[unpackedsize];
+    cufftComplex *tmpffta = new cufftComplex[fftedsize];
+    cufftComplex *tmpfftb = new cufftComplex[fftedsize];
+
     bool saved = false;
 
     //float *dmeans;
@@ -454,6 +487,11 @@ int main(int argc, char *argv[]) {
     filepola.seekg(0, filepola.beg);
     filepolb.seekg(0, filepolb.beg);
 
+    std::ofstream unpackedfilea ((outfil + ".unp0").c_str(), std::ios_base::binary);
+    std::ofstream unpackedfileb ((outfil + ".unp1").c_str(), std::ios_base::binary);
+    std::ofstream fftfilea ((outfil + ".fft0").c_str(), std::ios_base::binary);
+    std::ofstream fftfileb ((outfil + ".fft1").c_str(), std::ios_base::binary);
+
     while((filepola.tellg() < (filelengtha - NACCUMULATE * 8000)) && (filepolb.tellg() < (filelengthb - NACCUMULATE * 8000))) {
         //cout << filepola.tellg() << endl;
         // NOTE: This implementation
@@ -521,8 +559,6 @@ int main(int argc, char *argv[]) {
                     unpackedfile << tmpunpackeda[isamp] << " " << tmpunpackedb[isamp] << endl;
                 }
                 unpackedfile.close();
-                delete [] tmpunpackeda;
-                delete [] tmpunpackedb;
                 saved = true;
             }
 
@@ -533,6 +569,36 @@ int main(int argc, char *argv[]) {
             filfile.write(reinterpret_cast<char*>(tmppower), powersize * filhead.nbits / 8);
             saveend = std::chrono::steady_clock::now();
             runtimes.savetime += std::chrono::duration<float>(saveend - savestart).count();
+
+   
+
+            if (saveinter) {
+
+                interstart = std::chrono::steady_clock::now();
+
+                cudaCheckError(cudaMemcpy(tmpunpackeda, unpacked[0], unpackedsize * sizeof(float), cudaMemcpyDeviceToHost));
+		cudaCheckError(cudaMemcpy(tmpunpackedb, unpacked[1], unpackedsize * sizeof(float), cudaMemcpyDeviceToHost));
+                /*for (int isamp = 0; isamp < unpackedsize; ++isamp) {
+                    unpackedfile << tmpunpackeda[isamp] << " " << tmpunpackedb[isamp] << endl;
+                }*/
+
+                unpackedfilea.write(reinterpret_cast<char*>(tmpunpackeda), unpackedsize * sizeof(float));
+                unpackedfileb.write(reinterpret_cast<char*>(tmpunpackedb), unpackedsize * sizeof(float));
+
+                cudaCheckError(cudaMemcpy(tmpffta, ffted[0], fftedsize * sizeof(cufftComplex), cudaMemcpyDeviceToHost));
+                cudaCheckError(cudaMemcpy(tmpfftb, ffted[1], fftedsize * sizeof(cufftComplex), cudaMemcpyDeviceToHost));
+                /*for (int isamp = 0; isamp < fftedsize; ++isamp) {
+                    fftfile << tmpffta[isamp].x << " " << tmpffta[isamp].y << " " << tmpfftb[isamp].x << " " << tmpfftb[isamp].y << endl;
+                }*/
+
+                fftfilea.write(reinterpret_cast<char*>(tmpffta), fftedsize * sizeof(cufftComplex));
+                fftfileb.write(reinterpret_cast<char*>(tmpfftb), fftedsize * sizeof(cufftComplex));
+
+                interend = std::chrono::steady_clock::now();
+                runtimes.intertime += std::chrono::duration<float>(interend - interstart).count();           
+
+            }
+
         }
         cout << "Completed " << std::fixed << std::setprecision(2) << (float)filepola.tellg() / (float)(filelengtha - 1.0) * 100.0f << "%\r";
         cout.flush();
@@ -540,14 +606,21 @@ int main(int argc, char *argv[]) {
 
     cout << endl;
     filfile.close();
+    unpackedfilea.close();
+    unpackedfileb.close();
+    fftfilea.close();
+    fftfileb.close();
 
-    runtimes.totaltime = runtimes.readtime + runtimes.scaletime + runtimes.filtime + runtimes.savetime;
+    runtimes.totaltime = runtimes.readtime + runtimes.scaletime + runtimes.filtime + runtimes.savetime + runtimes.intertime;
 
     cout << "Total execution time: " << runtimes.totaltime << "s\n";
     cout << "\tScaling factors: " << runtimes.scaletime << "s\n";
     cout << "\tFile read: " << runtimes.readtime << "s\n";
     cout << "\tFilterbanking: " << runtimes.filtime << "s\n";
     cout << "\tFile write: " << runtimes.savetime << "s\n";
+    if (saveinter) {
+        cout << "\tIntermediate write: " << runtimes.intertime << "s\n";
+    }
 
     if (DEBUG) {
         std::ofstream outframes("dataframes.dat");
