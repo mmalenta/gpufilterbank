@@ -28,7 +28,6 @@ using std::vector;
 #define DEBUG 0
 #define GPURUN 1
 #define NACCUMULATE 4000
-#define NPOL 2
 #define PERBLOCK 625
 #define TIMEAVG 16 
 #define TIMESCALE 0.125
@@ -36,6 +35,10 @@ using std::vector;
 #define VDIFSIZE 8000
 #define FFTOUT 257
 #define FFTUSE 256
+
+#define INCHANS 4
+#define OUTCHANS 1024
+#define NPOL 2
 
 struct FrameInfo {
     unsigned int frameno;
@@ -88,6 +91,27 @@ __global__ void UnpackKernel(unsigned char **in, float **out, size_t samples) {
         idx += blockDim.x;
         outidx += blockDim.x * 4;
     }
+}
+
+__global__ void UnpackDada(int ntimes, ushort4 __restrict__ *indata, float __restrict__ *outdata) {
+
+    ushort4 tmpread;
+
+    for (int idx = blockIdx.x * blockDim.x + threadIdx; idx < ntimes; idx += gridDim.x * blockDim.x) {
+        
+        tmpread = indata[idx];
+
+        outdata[0][idx] = (float)(tmpread.x & 0xff);
+        outdata[0][idx + ntimes] = (float)(tmpread.x >> 0xff) & 0xff;
+        outdata[1][idx] = (float)(tmpread.y & 0xff);
+        outdata[1][idx + ntimes] = (float)(tmpread.y >> 0xff) & 0xff;
+        outdata[2][idx] = (float)(tmpread.z & 0xff);
+        outdata[2][idx + ntimes] = (float)(tmpread.z >> 0xff) & 0xff;
+        outdata[3][idx] = (float)(tmpread.w & 0xff);
+        outdata[3][idx + ntimes] = (float)(tmpread.w >> 0xff) & 0xff;        
+
+    }
+
 }
 
 // NOTE: Does not do any frequency averaging
