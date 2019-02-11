@@ -89,6 +89,21 @@ inline void ReadFilterbankHeader(std::string config, FilHead &head) {
 
 }
 
+inline void PrintFilterbankHeader(FilHead &head) {
+
+    std::cout << "Information currently stored in the header: " << std::endl
+                << "Source name: " << head.source << std::endl
+                << "Telescope ID: " << head.telescopeid << std::endl
+                << "Machine ID: " << head.machineid << std::endl
+                << "Start MJD: " << head.tstart << std::endl
+                << "Sampling time: " << head.tsamp << std::endl
+                << "Top frequency channel: " << head.fch1 << std::endl
+                << "Channel bandwidth: " << head.foff << std::endl
+                << "Number of channels: " << head.nchans << std::endl
+                << "Bits per sample: " << head.nbits << std::endl;
+
+}
+
 inline void WriteFilterbankHeader(std::ofstream &outfile, FilHead &head) {
 
     int length{0};
