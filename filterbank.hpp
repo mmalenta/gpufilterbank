@@ -96,9 +96,9 @@ inline void PrintFilterbankHeader(FilHead &head) {
                 << "Telescope ID: " << head.telescopeid << std::endl
                 << "Machine ID: " << head.machineid << std::endl
                 << "Start MJD: " << head.tstart << std::endl
-                << "Sampling time: " << head.tsamp << std::endl
-                << "Top frequency channel: " << head.fch1 << std::endl
-                << "Channel bandwidth: " << head.foff << std::endl
+                << "Sampling time: " << head.tsamp << "us" << std::endl
+                << "Top frequency channel: " << head.fch1 << "MHz" << std::endl
+                << "Channel bandwidth: " << head.foff << "MHz" << std::endl
                 << "Number of channels: " << head.nchans << std::endl
                 << "Bits per sample: " << head.nbits << std::endl;
 

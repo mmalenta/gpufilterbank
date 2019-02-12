@@ -38,6 +38,7 @@ inline void ReadDadaHeader(std::ifstream &indada, FilHead &head) {
     head.nbits = std::stoi(ReadDadaValue("NBIT", headerstream));    
     head.source = (ReadDadaValue("SOURCE", headerstream));
     head.tstart = std::stod(ReadDadaValue("MJD_START", headerstream));
+    head.tsamp = std::stod(ReadDadaValue("TSAMP", headerstream));
 
 }
 

@@ -331,15 +331,20 @@ int main(int argc, char *argv[]) {
         totalsamples = (int)((float)totalsamples / (OUTCHANS * TIMEAVG)) * OUTCHANS * TIMEAVG;
         std::cout << "Will use first" << totalsamples << " samples" << std::endl;
 
-        FilHead filhead;
+        FilHead filhead = {};
         ReadDadaHeader(indada, filhead);
+        if (!scaling) {
+            filhead.nbits = 32;
+        }
+        filhead.nchans = OUTCHANS;
+        filhead.tsamp = filhead.tsamp * OUTCHANS * TIMEAVG;
         PrintFilterbankHeader(filhead);
         
         size_t freemem = 0;
         size_t totalmem = 0;
         cudaCheckError(cudaMemGetInfo(&freemem, &totalmem));
-        // NOTE: Let's liffh just 50% of what's free, because cuFFT happens...
-        freemem = freemem * 0.50;
+        // NOTE: Let's liffh just 25% of what's free, because cuFFT happens...
+        freemem = freemem * 0.25;
         std::cout << "Total memory: " << totalmem / 1024.0f / 1024.0f << "MiB, with " << freemem / 1024.0f / 1024.0f << "MiB free" << std::endl;
         
         // original file + original file cast to cufftComplex for FFT + output filterbank file saved as 32 bit float
@@ -370,16 +375,14 @@ int main(int argc, char *argv[]) {
         }
 
         std::ofstream filfile(outfil.c_str(), std::ios_base::binary);
-        //WriteFilterbankHeader(filfile, filhead);
+        WriteFilterbankHeader(filfile, filhead);
 
         /**** ####
         // STAGE: MEMORY AND FFT
         #### ****/
         // NOTE: Factor of 4 to account for 2 polarisations and complex components for every time sample
         size_t blockread = sampperblock * 4;
-        cudaCheckError(cudaMemGetInfo(&freemem, &totalmem));
-        std::cout << "Total memory: " << totalmem / 1024.0f / 1024.0f << "MiB, with " << freemem / 1024.0f / 1024.0f << "MiB free" << std::endl;
-        std::cin.get();
+        size_t remread = remsamp * 4;
         
         cufftHandle fftplan;
         int fftsizes[1];
@@ -387,10 +390,6 @@ int main(int argc, char *argv[]) {
         // NOTE: Factor of 2 to account for 2 polarisations
         int fftbatchsize = sampperblock * 2 / fftsizes[0];
         cufftCheckError(cufftPlanMany(&fftplan, 1, fftsizes, NULL, 1, OUTCHANS, NULL, 1, OUTCHANS, CUFFT_C2C, fftbatchsize));
- 
-        cudaCheckError(cudaMemGetInfo(&freemem, &totalmem));
-        std::cout << "Total memory: " << totalmem / 1024.0f / 1024.0f << "MiB, with " << freemem / 1024.0f / 1024.0f << "MiB free" << std::endl;
-        std::cin.get();
  
         unsigned char *hostvoltage = new unsigned char[blockread];
         unsigned char *devicevoltage = new unsigned char[blockread];
@@ -431,8 +430,41 @@ int main(int argc, char *argv[]) {
 
             filfile.write(reinterpret_cast<char*>(hostpower), powersize * sizeof(float));
         } 
+        
+        cufftCheckError(cufftDestroy(fftplan));
+
+        if (remsamp) {
+
+            std::cout << "Processing the remainder block..." << std::endl;
+
+            indada.read(reinterpret_cast<char*>(hostvoltage), remread * sizeof(unsigned char));
+
+            cudaCheckError(cudaMemcpy(devicevoltage, hostvoltage, remread * sizeof(unsigned char), cudaMemcpyHostToDevice));
+
+            dim3 block(OUTCHANS, 1, 1);
+            dim3 grid (64, 1, 1);
+
+            UnpackDadaKernel<<<grid, block, 0, 0>>>(remsamp, reinterpret_cast<uchar4*>(devicevoltage), devicefft);
+            cudaCheckError(cudaGetLastError());
+
+            cufftHandle fftplanrem;
+            int fftrembatchsize = remsamp * 2 / fftsizes[0];
+            cufftCheckError(cufftPlanMany(&fftplanrem, 1, fftsizes, NULL, 1, OUTCHANS, NULL, 1, OUTCHANS, CUFFT_C2C, fftrembatchsize));
+
+            cufftCheckError(cufftExecC2C(fftplanrem, devicefft, devicefft, CUFFT_FORWARD));
+
+            DetectDadaKernel<<<grid, block, 0, 0>>>(remsamp / OUTCHANS, devicefft, devicepower);
+            cudaCheckError(cudaGetLastError());
+
+            cudaCheckError(cudaMemcpy(hostpower, devicepower, remsamp / OUTCHANS / TIMEAVG * OUTCHANS * sizeof(float), cudaMemcpyDeviceToHost));
+
+            filfile.write(reinterpret_cast<char*>(hostpower), remsamp / OUTCHANS / TIMEAVG * OUTCHANS * sizeof(float));
+
+            cufftCheckError(cufftDestroy(fftplanrem)); 
+        }
 
         filfile.close();
+        indada.close();
 
         cudaFree(devicepower);
         cudaFree(devicefft);
