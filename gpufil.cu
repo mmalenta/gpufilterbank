@@ -249,6 +249,20 @@ __global__ void DetectDadaKernel(int ntimes, cufftComplex* __restrict__ fftdata,
 
 }
 
+// NOTE: This is a very naive approach, but it works fast enough for now
+__global__ void BandpassKernel(int ntimes, float* __restrict__ powerdata, float* __restrict__ bandpass) {
+
+    float sum;
+
+    sum = 0.0f;
+
+    for (int isamp = 0; isamp < ntimes; ++isamp) {
+        sum += powerdata[isamp * OUTCHANS + threadIdx.x];
+    }
+
+    bandpass[threadIdx.x] += sum;
+
+}
 
 int main(int argc, char *argv[]) {
 
@@ -403,6 +417,9 @@ int main(int argc, char *argv[]) {
         float *devicepower;
         cudaCheckError(cudaMalloc((void**)&devicepower, powersize * sizeof(float)))
 
+        float *hostband = new float[OUTCHANS];
+        float *deviceband;
+        cudaCheckError(cudaMalloc((void**)&deviceband, OUTCHANS * sizeof(float)));
 
         // NOTE: Just in case I did something wrong
         indada.seekg(4096, indada.beg);
@@ -424,6 +441,9 @@ int main(int argc, char *argv[]) {
             cufftCheckError(cufftExecC2C(fftplan, devicefft, devicefft, CUFFT_FORWARD));
 
             DetectDadaKernel<<<grid, block, 0, 0>>>(sampperblock / OUTCHANS, devicefft, devicepower);
+            cudaCheckError(cudaGetLastError());
+
+            BandpassKernel<<<1, OUTCHANS, 0, 0>>>(sampperblock / OUTCHANS / TIMEAVG, devicepower, deviceband);
             cudaCheckError(cudaGetLastError());
 
             cudaCheckError(cudaMemcpy(hostpower, devicepower, powersize * sizeof(float), cudaMemcpyDeviceToHost));
@@ -456,6 +476,9 @@ int main(int argc, char *argv[]) {
             DetectDadaKernel<<<grid, block, 0, 0>>>(remsamp / OUTCHANS, devicefft, devicepower);
             cudaCheckError(cudaGetLastError());
 
+            BandpassKernel<<<1, OUTCHANS, 0, 0>>>(remsamp / OUTCHANS / TIMEAVG, devicepower, deviceband);
+            cudaCheckError(cudaGetLastError());
+
             cudaCheckError(cudaMemcpy(hostpower, devicepower, remsamp / OUTCHANS / TIMEAVG * OUTCHANS * sizeof(float), cudaMemcpyDeviceToHost));
 
             filfile.write(reinterpret_cast<char*>(hostpower), remsamp / OUTCHANS / TIMEAVG * OUTCHANS * sizeof(float));
@@ -463,13 +486,26 @@ int main(int argc, char *argv[]) {
             cufftCheckError(cufftDestroy(fftplanrem)); 
         }
 
+        cudaCheckError(cudaMemcpy(hostband, deviceband, OUTCHANS * sizeof(float), cudaMemcpyDeviceToHost));
+
+        std::ofstream bandout("bandpass.dat");
+
+        if (bandout) {
+            for (int ichan = 0; ichan < OUTCHANS; ++ichan) {
+                bandout << hostband[ichan] << std::endl;
+            }
+        }
+
+        bandout.close();
         filfile.close();
         indada.close();
 
+        cudaFree(deviceband);
         cudaFree(devicepower);
         cudaFree(devicefft);
         cudaFree(devicevoltage);
 
+        delete [] hostband;
         delete [] hostpower;
         delete [] hostvoltage;
 
