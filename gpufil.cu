@@ -14,9 +14,11 @@
 #include <thrust/sequence.h>
 #include <thrust/transform.h>
 
+#include "constants.hpp"
 #include "dada.hpp"
 #include "errors.hpp"
 #include "filterbank.hpp"
+#include "kernels.cuh"
 
 using std::cerr;
 using std::cout;
@@ -25,23 +27,6 @@ using std::ifstream;
 using std::ofstream;
 using std::string;
 using std::vector;
-
-#define DEBUG 0
-#define GPURUN 1
-#define NACCUMULATE 4000
-#define PERBLOCK 625
-#define TIMESCALE 0.125
-#define UNPACKFACTOR 4
-#define VDIFSIZE 8000
-#define FFTOUT 257
-#define FFTUSE 256
-
-#define COMPLEX 1
-#define INCHANS 1
-#define OUTCHANS 1024
-#define NPOL 2
-#define TIMEAVG 4
-#define INBANDS 1
 
 struct FrameInfo {
     unsigned int frameno;
@@ -200,69 +185,7 @@ __global__ void GetScalingFactorsKernel(float* __restrict__ indata, float *base,
 }
 */
 
-// NOTE: Not really optimised yet
-__global__ void UnpackDadaKernel(int ntimes, uchar4* __restrict__ indata, cufftComplex* __restrict__ outdata) {
 
-    uchar4 tmpread;
-
-    for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < ntimes; idx += gridDim.x * blockDim.x) {
-        
-        // tmpread = indata[idx];
-        // outdata[idx].x = (float)(tmpread.x);
-        // outdata[idx].y = (float)(tmpread.y);
-        // outdata[idx + ntimes].x = (float)(tmpread.z);
-        // outdata[idx + ntimes].y = (float)(tmpread.w);
-
-        tmpread = indata[idx];
-        outdata[idx].x = static_cast<float>(static_cast<unsigned short>(tmpread.x));
-        outdata[idx].y = static_cast<float>(static_cast<unsigned short>(tmpread.y));
-        outdata[idx + ntimes].x = static_cast<float>(static_cast<unsigned short>(tmpread.z));
-        outdata[idx + ntimes].y = static_cast<float>(static_cast<unsigned short>(tmpread.w));
-
-    }
-
-}
-
-__global__ void DetectDadaKernel(int ntimes, cufftComplex* __restrict__ fftdata, float* __restrict__ powerdata) {
-
-    //int inidx;
-    //int outidx;
-    int timeoffset;
-    int poloffset = ntimes * OUTCHANS;
-
-    float power = 0.0;;
-    cufftComplex tmpvalue;
-    for (int timeidx = blockIdx.x * TIMEAVG; timeidx < ntimes; timeidx += gridDim.x * TIMEAVG) {
-
-        timeoffset = timeidx * OUTCHANS;
-
-        for (int iavg = 0; iavg < TIMEAVG; ++iavg) {
-            tmpvalue = fftdata[timeoffset + iavg * OUTCHANS + threadIdx.x];
-            power += tmpvalue.x * tmpvalue.x + tmpvalue.y * tmpvalue.y;
-            tmpvalue = fftdata[poloffset + timeoffset + iavg * OUTCHANS + threadIdx.x];
-            power += tmpvalue.x * tmpvalue.x + tmpvalue.y * tmpvalue.y;
-        }
-
-        powerdata[timeoffset / TIMEAVG + threadIdx.x] = power;
-        power = 0.0f;
-    }
-
-}
-
-// NOTE: This is a very naive approach, but it works fast enough for now
-__global__ void BandpassKernel(int ntimes, float* __restrict__ powerdata, float* __restrict__ bandpass) {
-
-    float sum;
-
-    sum = 0.0f;
-
-    for (int isamp = 0; isamp < ntimes; ++isamp) {
-        sum += powerdata[isamp * OUTCHANS + threadIdx.x];
-    }
-
-    bandpass[threadIdx.x] += sum;
-
-}
 
 int main(int argc, char *argv[]) {
 
@@ -274,6 +197,8 @@ int main(int argc, char *argv[]) {
     double readsec; 
     bool scaling = false;
     bool saveinter = false;
+
+    std::vector<std::string> dadastrings; 
 
     if ((argc < 5) || (argv[1] == "-h") || (argv[1] == "--help")) {
         cout << "Incorrect number of arguments!" << endl;
@@ -298,8 +223,11 @@ int main(int argc, char *argv[]) {
             iarg++;
             inpolb = std::string(argv[iarg]);
         } else if (std::string(argv[iarg]) == "-d") {
-            iarg++;
-            dadastr = std::string(argv[iarg]);
+            for (int ifile = 0; ifile < 4; ++ifile) {
+                iarg++;
+                dadastr = std::string(argv[iarg]);
+                dadastrings.push_back(dadastr);
+            }
         } else if (std::string(argv[iarg]) == "-o") {
             iarg++;
             outfil = std::string(argv[iarg]);
@@ -323,16 +251,45 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    if (!dadastr.empty()) {
+    if (!dadastrings.empty()) {
 
-        cout << "Input file: " << dadastr << endl;
+        std::cout << "Input files: ";
+            for (auto &dadastring: dadastrings) {
+                std::cout << dadastring << " ";
+            }
+        std::cout << std::endl;
         
-        std::ifstream indada(dadastr.c_str(), std::ios_base::binary);        
+        long long filesize = 0;
+
+        for (auto &dadastring: dadastrings) {
+            std::ifstream indada(dadastring.c_str(), std::ios_base::binary);
+
+            if (indada) {
+
+                indada.seekg(0, indada.end);
+                if (!filesize) {
+                    filesize = indada.tellg() - 4096L;
+                }
+                
+                if (filesize != indada.tellg() - 4096L) {
+                    std::cerr << "Files do not have the same size!" << std::endl;
+                    exit(EXIT_FAILURE);
+                }
+                indada.close();
+
+            } else {
+                std::cerr << "Could not open file: " << dadastring << std::endl;
+                exit(EXIT_FAILURE);
+            }
+
+        }
+
+        /* std::ifstream indada(dadastr.c_str(), std::ios_base::binary);        
         long long filesize = 0;
         indada.seekg(0, indada.end);
         filesize = indada.tellg() - 4096L;
         indada.seekg(0, indada.beg);
-
+        */ 
         // NOTE: 4 bytes per full time sample: 1 byte sampling, 2 polarisations, complex number
         size_t totalsamples = filesize / 4;
         if (filesize != totalsamples * 4) {
@@ -345,15 +302,6 @@ int main(int argc, char *argv[]) {
         totalsamples = (int)((float)totalsamples / (OUTCHANS * TIMEAVG)) * OUTCHANS * TIMEAVG;
         std::cout << "Will use first" << totalsamples << " samples" << std::endl;
 
-        FilHead filhead = {};
-        ReadDadaHeader(indada, filhead);
-        if (!scaling) {
-            filhead.nbits = 32;
-        }
-        filhead.nchans = OUTCHANS;
-        filhead.tsamp = filhead.tsamp * OUTCHANS * TIMEAVG;
-        PrintFilterbankHeader(filhead);
-        
         size_t freemem = 0;
         size_t totalmem = 0;
         cudaCheckError(cudaMemGetInfo(&freemem, &totalmem));
@@ -361,8 +309,8 @@ int main(int argc, char *argv[]) {
         freemem = freemem * 0.25;
         std::cout << "Total memory: " << totalmem / 1024.0f / 1024.0f << "MiB, with " << freemem / 1024.0f / 1024.0f << "MiB free" << std::endl;
         
-        // original file + original file cast to cufftComplex for FFT + output filterbank file saved as 32 bit float
-        size_t needmem = 4 * totalsamples + 4 * totalsamples * 4 + totalsamples / OUTCHANS / TIMEAVG * OUTCHANS * 4;
+        // original file + original file cast to cufftComplex for FFT + output filterbank file saved as 32 bit float, all times the number of input files
+        size_t needmem = (4 * totalsamples + 4 * totalsamples * 4 + totalsamples / OUTCHANS / TIMEAVG * OUTCHANS * 4) * dadastrings.size();
         std::cout << "Need " << needmem / 1024.0f / 1024.0f << "MiB on the device" << std::endl;
         
         int nblocks = 0;
@@ -376,33 +324,34 @@ int main(int argc, char *argv[]) {
         } else {
             std::cout << "We need to divide the job..." << std::endl;
 
-            sampperblock = (int)((float)freemem / ((float)(OUTCHANS * TIMEAVG) * (4.0f + 16.0f + 4.0f / (float)TIMEAVG))) * OUTCHANS * TIMEAVG;
+            sampperblock = (int)((float)freemem / (dadastrings.size() * (float)(OUTCHANS * TIMEAVG) * (4.0f + 16.0f + 4.0f / (float)TIMEAVG))) * OUTCHANS * TIMEAVG;
             nblocks = (int)(totalsamples / sampperblock);
             remsamp = totalsamples - nblocks * sampperblock;
 
             std::cout << "Will process the data in " << nblocks << " blocks, with "
-                        << sampperblock << " samples per block";
+                        << sampperblock << " samples per block "
+                        << "(" << dadastrings.size() << " files per block)";
             if (remsamp) {
                 std::cout << " and an extra block with " << remsamp << " samples at the end";
             }
             std::cout << std::endl;
         }
 
-        std::ofstream filfile(outfil.c_str(), std::ios_base::binary);
-        WriteFilterbankHeader(filfile, filhead);
-
         /**** ####
         // STAGE: MEMORY AND FFT
         #### ****/
         // NOTE: Factor of 4 to account for 2 polarisations and complex components for every time sample
-        size_t blockread = sampperblock * 4;
-        size_t remread = remsamp * 4;
+        size_t blockread = sampperblock * 4 * dadastrings.size();
+        size_t perfileread = sampperblock * 4;
+        size_t remread = remsamp * 4 * dadastrings.size();
+        size_t perfilerem = remsamp * 4;
         
+        // NOTE: This is a very annoying stage where cufftPlanMany uses ridiculous amount of temporary buffer and runs out of memory most of the time
         cufftHandle fftplan;
         int fftsizes[1];
         fftsizes[0] = OUTCHANS;
         // NOTE: Factor of 2 to account for 2 polarisations
-        int fftbatchsize = sampperblock * 2 / fftsizes[0];
+        int fftbatchsize = sampperblock * 2 / fftsizes[0] * dadastrings.size();
         cufftCheckError(cufftPlanMany(&fftplan, 1, fftsizes, NULL, 1, OUTCHANS, NULL, 1, OUTCHANS, CUFFT_C2C, fftbatchsize));
  
         unsigned char *hostvoltage = new unsigned char[blockread];
@@ -412,30 +361,67 @@ int main(int argc, char *argv[]) {
         cufftComplex *devicefft;
         cudaCheckError(cudaMalloc((void**)&devicefft, sampperblock * 2 * sizeof(cufftComplex)));
 
-        size_t powersize = sampperblock / OUTCHANS * OUTCHANS / TIMEAVG;
+        size_t powersize = sampperblock / OUTCHANS * OUTCHANS / TIMEAVG * dadastrings.size();
         float *hostpower = new float[powersize];
         float *devicepower;
         cudaCheckError(cudaMalloc((void**)&devicepower, powersize * sizeof(float)))
 
-        float *hostband = new float[OUTCHANS];
+        float *hostband = new float[OUTCHANS * dadastrings.size()];
         float *deviceband;
-        cudaCheckError(cudaMalloc((void**)&deviceband, OUTCHANS * sizeof(float)));
+        cudaCheckError(cudaMalloc((void**)&deviceband, OUTCHANS * dadastrings.size() * sizeof(float)));
+        
 
-        // NOTE: Just in case I did something wrong
-        indada.seekg(4096, indada.beg);
+        size_t fullfillsize = powersize * dadastrings.size() + remsamp / OUTCHANS / TIMEAVG * OUTCHANS;
+        float *fullfil = new float[fullfillsize];
+
+        std::vector<FilHead> filheaders;
+        std::vector<std::ifstream> dadastreams;
+
+        for (int ifile = 0; ifile < dadastrings.size(); ++ifile) {
+
+            dadastreams.push_back(std::ifstream());
+
+            dadastreams.back().open(dadastrings.at(ifile).c_str(), std::ios_base::binary);
+
+            // std::ifstream indada(dadastrings.at(ifile).c_str(), std::ios_base::binary);
+            
+            FilHead filhead = {};
+            ReadDadaHeader(dadastreams.back(), filhead);
+
+            if (!scaling) {
+                filhead.nbits = 32;
+            }
+            filhead.nchans = OUTCHANS;
+            filhead.tsamp = filhead.tsamp * OUTCHANS * TIMEAVG;
+        
+            filheaders.push_back(filhead);
+        
+            PrintFilterbankHeader(filheaders.at(ifile));
+            
+            // NOTE: Just in case I did something wrong
+            dadastreams.back().seekg(4096, dadastreams.back().beg);
+
+        }
+
+        std::ofstream filfile(outfil.c_str(), std::ios_base::binary);
+        //WriteFilterbankHeader(filfile, filhead);
 
         for (int iblock = 0; iblock < nblocks; iblock++) {
 
             std::cout << "Processing block " << iblock << "..." << std::endl;
 
-            indada.read(reinterpret_cast<char*>(hostvoltage), blockread * sizeof(unsigned char));
+            for (int ifile = 0; ifile < dadastrings.size(); ++ifile) {
+                std::cout << "Reading file " << dadastrings.at(ifile) << "..." << std::endl;
+               
+                dadastreams.at(ifile).read(reinterpret_cast<char*>(hostvoltage + ifile * perfileread), perfileread * sizeof(unsigned char));
+            }
 
             cudaCheckError(cudaMemcpy(devicevoltage, hostvoltage, blockread * sizeof(unsigned char), cudaMemcpyHostToDevice));
 
             dim3 block (OUTCHANS, 1, 1);
             dim3 grid (64, 1, 1);
 
-            UnpackDadaKernel<<<grid, block, 0, 0>>>(sampperblock, reinterpret_cast<uchar4*>(devicevoltage), devicefft);
+            UnpackDadaKernel<<<grid, block, 0, 0>>>(sampperblock * dadastrings.size(), reinterpret_cast<uchar4*>(devicevoltage), devicefft);
             cudaCheckError(cudaGetLastError());
 
             cufftCheckError(cufftExecC2C(fftplan, devicefft, devicefft, CUFFT_FORWARD));
@@ -446,9 +432,12 @@ int main(int argc, char *argv[]) {
             BandpassKernel<<<1, OUTCHANS, 0, 0>>>(sampperblock / OUTCHANS / TIMEAVG, devicepower, deviceband);
             cudaCheckError(cudaGetLastError());
 
-            cudaCheckError(cudaMemcpy(hostpower, devicepower, powersize * sizeof(float), cudaMemcpyDeviceToHost));
+            //cudaCheckError(cudaMemcpy(hostpower, devicepower, powersize * sizeof(float), cudaMemcpyDeviceToHost));
 
-            filfile.write(reinterpret_cast<char*>(hostpower), powersize * sizeof(float));
+            //filfile.write(reinterpret_cast<char*>(hostpower), powersize * sizeof(float));
+
+            cudaCheckError(cudaMemcpy(fullfil + powersize * dadastrings.size() * iblock, devicepower,
+                                        powersize * dadastrings.size() * sizeof(float), cudaMemcpyDeviceToHost));
         } 
         
         cufftCheckError(cufftDestroy(fftplan));
@@ -457,7 +446,11 @@ int main(int argc, char *argv[]) {
 
             std::cout << "Processing the remainder block..." << std::endl;
 
-            indada.read(reinterpret_cast<char*>(hostvoltage), remread * sizeof(unsigned char));
+            for (int ifile = 0; ifile < dadastrings.size(); ++ifile) {
+                std::cout << "Reading file " << dadastrings.at(ifile) << "..." << std::endl;
+               
+                dadastreams.at(ifile).read(reinterpret_cast<char*>(hostvoltage + ifile * perfilerem), perfilerem * sizeof(unsigned char));
+            }
 
             cudaCheckError(cudaMemcpy(devicevoltage, hostvoltage, remread * sizeof(unsigned char), cudaMemcpyHostToDevice));
 
@@ -479,14 +472,19 @@ int main(int argc, char *argv[]) {
             BandpassKernel<<<1, OUTCHANS, 0, 0>>>(remsamp / OUTCHANS / TIMEAVG, devicepower, deviceband);
             cudaCheckError(cudaGetLastError());
 
-            cudaCheckError(cudaMemcpy(hostpower, devicepower, remsamp / OUTCHANS / TIMEAVG * OUTCHANS * sizeof(float), cudaMemcpyDeviceToHost));
+            //cudaCheckError(cudaMemcpy(hostpower, devicepower, remsamp / OUTCHANS / TIMEAVG * OUTCHANS * sizeof(float), cudaMemcpyDeviceToHost));
 
-            filfile.write(reinterpret_cast<char*>(hostpower), remsamp / OUTCHANS / TIMEAVG * OUTCHANS * sizeof(float));
+            //filfile.write(reinterpret_cast<char*>(hostpower), remsamp / OUTCHANS / TIMEAVG * OUTCHANS * sizeof(float));
 
-            cufftCheckError(cufftDestroy(fftplanrem)); 
+            cufftCheckError(cufftDestroy(fftplanrem));
+
+            cudaCheckError(cudaMemcpy(fullfil + nblocks * powersize * dadastrings.size(), devicepower,
+                                        remsamp / OUTCHANS / TIMEAVG * OUTCHANS * sizeof(float) * dadastrings.size(), cudaMemcpyDeviceToHost));
         }
 
         cudaCheckError(cudaMemcpy(hostband, deviceband, OUTCHANS * sizeof(float), cudaMemcpyDeviceToHost));
+
+
 
         std::ofstream bandout("bandpass.dat");
 
@@ -498,13 +496,17 @@ int main(int argc, char *argv[]) {
 
         bandout.close();
         filfile.close();
-        indada.close();
+        
+        for (auto &dadastream: dadastreams) {
+            dadastream.close();
+        }
 
         cudaFree(deviceband);
         cudaFree(devicepower);
         cudaFree(devicefft);
         cudaFree(devicevoltage);
 
+        delete [] fullfil;
         delete [] hostband;
         delete [] hostpower;
         delete [] hostvoltage;
