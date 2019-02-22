@@ -217,7 +217,7 @@ int main(int argc, char *argv[]) {
         cudaCheckError(cudaMalloc((void**)&devicevoltage, blockread * sizeof(unsigned char)));
 
         cufftComplex *devicefft;
-        cudaCheckError(cudaMalloc((void**)&devicefft, sampperblock * 2 * sizeof(cufftComplex)));
+        cudaCheckError(cudaMalloc((void**)&devicefft, sampperblock * 2 * dadastrings.size() * sizeof(cufftComplex)));
 
         size_t powersize = sampperblock / OUTCHANS * OUTCHANS / TIMEAVG * dadastrings.size();
         float *hostpower = new float[powersize];
@@ -229,8 +229,8 @@ int main(int argc, char *argv[]) {
         cudaCheckError(cudaMalloc((void**)&deviceband, OUTCHANS * dadastrings.size() * sizeof(float)));
         
 
-        size_t fullfillsize = nblocks * powersize * dadastrings.size() + remsamp / OUTCHANS / TIMEAVG * OUTCHANS * dadastrings.size();
-        float *fullfil = new float[fullfillsize];
+        size_t fullfilsize = nblocks * powersize + remsamp / OUTCHANS / TIMEAVG * OUTCHANS * dadastrings.size();
+        float *fullfil = new float[fullfilsize];
 
         std::vector<FilHead> filheaders;
         std::vector<std::ifstream> dadastreams;
@@ -283,22 +283,25 @@ int main(int argc, char *argv[]) {
             dim3 grid (64, 1, 1);
 
             UnpackDadaKernel<<<grid, block, 0, 0>>>(sampperblock * dadastrings.size(), reinterpret_cast<uchar4*>(devicevoltage), devicefft);
+            cudaDeviceSynchronize();
             cudaCheckError(cudaGetLastError());
 
             cufftCheckError(cufftExecC2C(fftplan, devicefft, devicefft, CUFFT_FORWARD));
 
             DetectDadaKernel<<<grid, block, 0, 0>>>(sampperblock / OUTCHANS, devicefft, devicepower, dadastrings.size());
+            cudaDeviceSynchronize();
             cudaCheckError(cudaGetLastError());
 
             BandpassKernel<<<dadastrings.size(), OUTCHANS, 0, 0>>>(sampperblock / OUTCHANS / TIMEAVG, devicepower, deviceband);
-            cudaCheckError(cudaGetLastError());
+            cudaDeviceSynchronize();
+	    cudaCheckError(cudaGetLastError());
 
             //cudaCheckError(cudaMemcpy(hostpower, devicepower, powersize * sizeof(float), cudaMemcpyDeviceToHost));
 
             //filfile.write(reinterpret_cast<char*>(hostpower), powersize * sizeof(float));
 
-            cudaCheckError(cudaMemcpy(fullfil + powersize * dadastrings.size() * iblock, devicepower,
-                                        powersize * dadastrings.size() * sizeof(float), cudaMemcpyDeviceToHost));
+            cudaCheckError(cudaMemcpy(fullfil + powersize * iblock, devicepower,
+                                        powersize * sizeof(float), cudaMemcpyDeviceToHost));
         } 
         
         cufftCheckError(cufftDestroy(fftplan));
@@ -319,6 +322,7 @@ int main(int argc, char *argv[]) {
             dim3 grid (64, 1, 1);
 
             UnpackDadaKernel<<<grid, block, 0, 0>>>(remsamp, reinterpret_cast<uchar4*>(devicevoltage), devicefft);
+            cudaDeviceSynchronize();
             cudaCheckError(cudaGetLastError());
 
             cufftHandle fftplanrem;
@@ -328,9 +332,11 @@ int main(int argc, char *argv[]) {
             cufftCheckError(cufftExecC2C(fftplanrem, devicefft, devicefft, CUFFT_FORWARD));
 
             DetectDadaKernel<<<grid, block, 0, 0>>>(remsamp / OUTCHANS, devicefft, devicepower, dadastrings.size());
+            cudaDeviceSynchronize();
             cudaCheckError(cudaGetLastError());
 
             BandpassKernel<<<1, OUTCHANS, 0, 0>>>(remsamp / OUTCHANS / TIMEAVG, devicepower, deviceband);
+            cudaDeviceSynchronize();
             cudaCheckError(cudaGetLastError());
 
             //cudaCheckError(cudaMemcpy(hostpower, devicepower, remsamp / OUTCHANS / TIMEAVG * OUTCHANS * sizeof(float), cudaMemcpyDeviceToHost));
@@ -339,7 +345,7 @@ int main(int argc, char *argv[]) {
 
             cufftCheckError(cufftDestroy(fftplanrem));
 
-            cudaCheckError(cudaMemcpy(fullfil + nblocks * powersize * dadastrings.size(), devicepower,
+            cudaCheckError(cudaMemcpy(fullfil + nblocks * powersize, devicepower,
                                         remsamp / OUTCHANS / TIMEAVG * OUTCHANS * sizeof(float) * dadastrings.size(), cudaMemcpyDeviceToHost));
         }
 
@@ -489,7 +495,7 @@ int main(int argc, char *argv[]) {
         cleanstart = std::chrono::steady_clock::now();
         for (auto &ichan: maskedchans) {
 
-            for (size_t isamp = 0; isamp < totalsamples; ++isamp) {
+            for (size_t isamp = 0; isamp < fullfilsize / (OUTCHANS * dadastrings.size()); ++isamp) {
 
                 fullfil[isamp * OUTCHANS * dadastrings.size() + ichan] = hostband[ichan];
 
@@ -500,7 +506,9 @@ int main(int argc, char *argv[]) {
 
         std::cout << "Took " << std::chrono::duration<double>(cleanend - cleanstart).count() << "s to clean the data..." << std::endl;
 
-        filfile.write(reinterpret_cast<char*>(fullfil), totalsamples * OUTCHANS * dadastrings.size() * sizeof(float));
+        std::cout << "Will write " << fullfilsize * sizeof(float) / 1024.0f / 1024.0f
+			<< "MiB to the disk" << std::endl;
+        filfile.write(reinterpret_cast<char*>(fullfil), fullfilsize * sizeof(float));
 
         /*
         for (int iblock = 0; iblock < nblocks; ++iblock) {

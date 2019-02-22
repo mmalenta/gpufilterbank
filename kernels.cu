@@ -63,7 +63,7 @@ __global__ void BandpassKernel(int ntimes, float* __restrict__ powerdata, float*
     float sum;
 
     int chanidx = blockIdx.x * OUTCHANS + threadIdx.x;
-    int fullchans = blockDim.x * OUTCHANS;
+    int fullchans = gridDim.x * OUTCHANS;
 
 
     sum = 0.0f;
