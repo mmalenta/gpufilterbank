@@ -229,7 +229,7 @@ int main(int argc, char *argv[]) {
         cudaCheckError(cudaMalloc((void**)&deviceband, OUTCHANS * dadastrings.size() * sizeof(float)));
         
 
-        size_t fullfillsize = powersize * dadastrings.size() + remsamp / OUTCHANS / TIMEAVG * OUTCHANS;
+        size_t fullfillsize = nblocks * powersize * dadastrings.size() + remsamp / OUTCHANS / TIMEAVG * OUTCHANS * dadastrings.size();
         float *fullfil = new float[fullfillsize];
 
         std::vector<FilHead> filheaders;
