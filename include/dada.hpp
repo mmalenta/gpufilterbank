@@ -39,7 +39,8 @@ inline void ReadDadaHeader(std::ifstream &indada, FilHead &head) {
     head.source = (ReadDadaValue("SOURCE", headerstream));
     head.tstart = std::stod(ReadDadaValue("MJD_START", headerstream));
     head.tsamp = std::stod(ReadDadaValue("TSAMP", headerstream));
-
+    head.fch1 = std::stod(ReadDadaValue("FREQ", headerstream));
+    head.foff = std::stod(ReadDadaValue("BW", headerstream));
 }
 
 #endif

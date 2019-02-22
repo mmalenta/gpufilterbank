@@ -26,32 +26,34 @@ __global__ void UnpackDadaKernel(int ntimes, uchar4* __restrict__ indata, cufftC
     }
 
 }
-// NOTE: For this kernel, ntime is the number of time samples for single band
+// NOTE: For this kernel, ntime is the number of non-averaged time samples for a single band
 __global__ void DetectDadaKernel(int ntimes, cufftComplex* __restrict__ fftdata, float* __restrict__ powerdata, int nbands) {
 
     int timeoffset;
+    int bandoffset;
     int poloffset = ntimes * OUTCHANS * nbands;
 
     float power = 0.0;;
     cufftComplex tmpvalue;
     //NOTE: We need to make sure we can process more than one band
     for (int iband = 0; iband < nbands; ++iband) {
+        bandoffset = iband * ntimes;
         // NOTE: Time samples and channels within the bands are continguous - same as in the single band case, so no problem here
         for (int timeidx = blockIdx.x * TIMEAVG; timeidx < ntimes; timeidx += gridDim.x * TIMEAVG) {
 
-            timeoffset = iband * ntimes + timeidx * OUTCHANS;
+            timeoffset = timeidx * OUTCHANS;
 
             for (int iavg = 0; iavg < TIMEAVG; ++iavg) {
-                tmpvalue = fftdata[timeoffset + iavg * OUTCHANS + threadIdx.x];
+                tmpvalue = fftdata[bandoffset + timeoffset + iavg * OUTCHANS + threadIdx.x];
                 power += tmpvalue.x * tmpvalue.x + tmpvalue.y * tmpvalue.y;
-                tmpvalue = fftdata[poloffset + timeoffset + iavg * OUTCHANS + threadIdx.x];
+                tmpvalue = fftdata[poloffset + bandoffset + timeoffset + iavg * OUTCHANS + threadIdx.x];
                 power += tmpvalue.x * tmpvalue.x + tmpvalue.y * tmpvalue.y;
             }
 
             // NOTE: Need to swap the negative frequencies
-            int outthreadidx = (threadIdx.x + 512) % 1024;
+            int outthreadidx = (threadIdx.x + 512) % OUTCHANS;
 
-            powerdata[timeoffset / TIMEAVG + iband * OUTCHANS + outthreadidx] = power;
+            powerdata[timeidx / TIMEAVG * OUTCHANS * nbands + iband * OUTCHANS + outthreadidx] = power;
             power = 0.0f;
         }
     }
