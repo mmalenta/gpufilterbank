@@ -397,13 +397,6 @@ int main(int argc, char *argv[]) {
 
         }
         
-        std::ofstream medianbandout("bandpass_median.dat");
-        if (medianbandout) {
-            for (int ichan = 0; ichan < dadastrings.size() * OUTCHANS; ++ichan) {
-                medianbandout << medianhostband[ichan] << std::endl;
-            }
-        }
-        medianbandout.close();
         
         for (int iband = 0; iband < dadastrings.size(); ++iband) {
             bandskip = iband * OUTCHANS;
@@ -416,7 +409,15 @@ int main(int argc, char *argv[]) {
                 medianhostband[ichan + bandskip] = medianhostband[ichan + bandskip - 1] + (medianhostband[ichan + bandskip - 1] - medianhostband[ichan + bandskip - 2]);
             }
         }
-
+        
+        std::ofstream medianbandout("bandpass_median.dat");
+        if (medianbandout) {
+            for (int ichan = 0; ichan < dadastrings.size() * OUTCHANS; ++ichan) {
+                medianbandout << medianhostband[ichan] << std::endl;
+            }
+        }
+        medianbandout.close();
+        
         float banddiff;
         for (int iband = 1; iband < dadastrings.size(); ++iband) {
 
