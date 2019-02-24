@@ -397,9 +397,11 @@ int main(int argc, char *argv[]) {
 
         }
         
-        
         for (int iband = 0; iband < dadastrings.size(); ++iband) {
+        
             bandskip = iband * OUTCHANS;
+            // NOTE: Remove the horrible DC compoment artifacts
+            hostband[bandskip + 512] = medianhostband[bandskip + 512];
             // NOTE: Start of the band
             for (int ichan = 15; ichan >= 0; --ichan) {
                 medianhostband[ichan + bandskip] = medianhostband[ichan + bandskip + 1] + (medianhostband[ichan + bandskip + 1] - medianhostband[ichan + bandskip + 2]);
@@ -417,7 +419,7 @@ int main(int argc, char *argv[]) {
             }
         }
         medianbandout.close();
-        
+
         float banddiff;
         for (int iband = 1; iband < dadastrings.size(); ++iband) {
 
@@ -447,6 +449,14 @@ int main(int argc, char *argv[]) {
         medianhostband, normalisedband,
         [] (float band, float median) -> float { return band / median; });
         
+        std::ofstream normbandout("normalised_band.dat");
+        if (normbandout) {
+            for (int ichan = 0; ichan < fullchans; ++ichan) {
+                normbandout << normalisedband[ichan] << std::endl;
+            }
+        }
+        normbandout.close();
+
         const int nrep = 4;
         int tmpcount = 0;
         const float threshold = 5.0;
@@ -462,7 +472,10 @@ int main(int argc, char *argv[]) {
             normean += tmpdata;
             normstd += tmpdata * tmpdata;
         }
+        normean = normean / float(OUTCHANS * dadastrings.size());
         normstd = sqrtf(normstd / float(OUTCHANS * dadastrings.size()) - normean * normean);
+
+        std::ofstream statsout("band_stats.dat");
 
         // NOTE: We estimate 'true' mean and standard deviation of normalised bandpass excluding outliers after every run
         for (int irep = 0 ; irep < nrep; ++irep) {
@@ -482,11 +495,17 @@ int main(int argc, char *argv[]) {
             normean = tmpmean;
             normstd = tmpstd;
 
+            if (statsout) {
+                statsout << normean << " " << normstd << std::endl;
+            }
+
             tmpmean = 0.0f;
             tmpstd = 0.0f;
             tmpcount = 0;
 
         }
+
+        statsout.close();
 
         /**** ####
         // STAGE: CLEANING THE DATA
