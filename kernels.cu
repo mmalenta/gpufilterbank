@@ -37,7 +37,7 @@ __global__ void DetectDadaKernel(int ntimes, cufftComplex* __restrict__ fftdata,
     cufftComplex tmpvalue;
     //NOTE: We need to make sure we can process more than one band
     for (int iband = 0; iband < nbands; ++iband) {
-        bandoffset = iband * ntime * OUTCHANS;
+        bandoffset = iband * ntimes * OUTCHANS;
         // NOTE: Time samples and channels within the bands are continguous - same as in the single band case, so no problem here
         for (int timeidx = blockIdx.x * TIMEAVG; timeidx < ntimes; timeidx += gridDim.x * TIMEAVG) {
 

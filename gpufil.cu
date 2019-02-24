@@ -373,53 +373,72 @@ int main(int argc, char *argv[]) {
         // NOTE: Quick and dirty bandpass cleaning
         // NOTE: First adjust the levels between different bands
 
-        float banddiff;
+        // NOTE: This cannot be done here - there's a possibility of massive RFI at the ends of bands
+        
+        // Saved in the 'middle of range' (rounded up)
+        float *medianhostband = new float[OUTCHANS * dadastrings.size()];
+        const int mediansize = 32;
 
+        int bandskip = 0;
+
+        for (int iband = 0; iband < dadastrings.size(); ++iband) {
+
+            float currentmedian = 0.0f;
+            bandskip = iband * OUTCHANS;
+
+            for (int ichan = 16; ichan < OUTCHANS - 16; ++ichan) {
+                
+                std::vector<float> subvector(hostband + bandskip + ichan - 16, hostband + bandskip + ichan + 16);
+                std::sort(subvector.begin(), subvector.end());
+                currentmedian = (subvector.at(16) + subvector.at(15)) / 2.0f;
+                medianhostband[ichan + iband * OUTCHANS] = currentmedian;
+    
+            }
+
+        }
+        
+        std::ofstream medianbandout("bandpass_median.dat");
+        if (medianbandout) {
+            for (int ichan = 0; ichan < dadastrings.size() * OUTCHANS; ++ichan) {
+                medianbandout << medianhostband[ichan] << std::endl;
+            }
+        }
+        medianbandout.close();
+        
+        for (int iband = 0; iband < dadastrings.size(); ++iband) {
+            bandskip = iband * OUTCHANS;
+            // NOTE: Start of the band
+            for (int ichan = 15; ichan >= 0; --ichan) {
+                medianhostband[ichan + bandskip] = medianhostband[ichan + bandskip + 1] + (medianhostband[ichan + bandskip + 1] - medianhostband[ichan + bandskip + 2]);
+            }
+            // NOTE: End of the band
+            for (int ichan = OUTCHANS - 16; ichan < OUTCHANS; ++ichan) {
+                medianhostband[ichan + bandskip] = medianhostband[ichan + bandskip - 1] + (medianhostband[ichan + bandskip - 1] - medianhostband[ichan + bandskip - 2]);
+            }
+        }
+
+        float banddiff;
         for (int iband = 1; iband < dadastrings.size(); ++iband) {
 
-            banddiff = hostband[OUTCHANS - 1] - hostband[iband * OUTCHANS];
+            banddiff = medianhostband[OUTCHANS - 1] - medianhostband[iband * OUTCHANS];
             std::transform(hostband + iband * OUTCHANS, hostband + (iband + 1) * OUTCHANS,
                             hostband + iband * OUTCHANS,
                             [banddiff](float val) -> float { return val + banddiff; });            
 
         }
 
-        // NOTE: And now get the running median of 32 channels
-        // Saved in the 'middle of range' (rounded up)
-        float *medianhostband = new float[OUTCHANS * dadastrings.size()];
-        const int mediansize = 32;
-
-        float currentmedian = 0.0f;
-
-        for (int ichan = 16; ichan < OUTCHANS * dadastrings.size() - 16; ++ichan) {
-
-            std::vector<float> subvector(hostband + ichan - 16, hostband + ichan + 16);
-            std::sort(subvector.begin(), subvector.end());
-            currentmedian = (subvector.at(16) + subvector.at(15)) / 2.0f;
-            medianhostband[ichan] = currentmedian;
-
+        std::ofstream adjbandout("adjusted_band.dat");
+        if (adjbandout) {
+            for (int ichan = 0; ichan < fullchans; ++ichan) {
+                adjbandout << hostband[ichan] << std::endl;
+            }
         }
+        adjbandout.close();
+
+        // NOTE: And now get the running median of 32 channels
       
         // NOTE: And now take care of leftover samples from the median at the start and end of the band
         // NOTE: Uses very simple linear interpolation - might move to something more sophisticated later, but this seems to do the job for now
-
-        // NOTE: Start of the band
-        for (int ichan = 15; ichan >= 0; --ichan) {
-            medianhostband[ichan] = medianhostband[ichan + 1] + (medianhostband[ichan + 1] - medianhostband[ichan + 2]);
-        }
-
-        // NOTE: End of the band
-        for (int ichan = OUTCHANS * dadastrings.size() - 16; ichan < OUTCHANS * dadastrings.size(); ++ichan) {
-            medianhostband[ichan] = medianhostband[ichan - 1] + (medianhostband[ichan - 1] - medianhostband[ichan - 2]);
-        }
-
-        std::ofstream medianbandout("bandpass_median.dat");
-        if (medianbandout) {
-            for (int ichan = 0; ichan < dadastrings.size() * OUTCHANS; ++ichan) {
-                medianbandout << medianhostband << std::endl;
-            }
-        }
-        medianbandout.close();
         
         float *normalisedband = new float[OUTCHANS * dadastrings.size()];
         
@@ -472,6 +491,7 @@ int main(int argc, char *argv[]) {
         // STAGE: CLEANING THE DATA
         #### ****/
         // NOTE: Check which channels are offending and replace the original band channel with median
+        // TODO: Also need to adjust the levels of 3 bands - this has to be done on the GPU now
         std::vector<int> maskedchans;
 
         for (int ichan = 0; ichan < dadastrings.size() * OUTCHANS; ++ichan) {
@@ -590,4 +610,4 @@ int main(int argc, char *argv[]) {
 
     return 0;
 
-}6
+}
