@@ -347,7 +347,7 @@ int main(int argc, char *argv[]) {
             cudaDeviceSynchronize();
             cudaCheckError(cudaGetLastError());
 
-            BandpassKernel<<<1, OUTCHANS, 0, 0>>>(remtimesamplesout, devicepower, deviceband);
+            BandpassKernel<<<dadastrings.size(), OUTCHANS, 0, 0>>>(remtimesamplesout, devicepower, deviceband);
             cudaDeviceSynchronize();
             cudaCheckError(cudaGetLastError());
 
@@ -361,10 +361,10 @@ int main(int argc, char *argv[]) {
                                         remvoltagesamples / OUTCHANS / TIMEAVG * OUTCHANS * sizeof(float) * dadastrings.size(), cudaMemcpyDeviceToHost));
         }
 
-        cudaCheckError(cudaMemcpy(hostband, deviceband, dadastrings.size() * OUTCHANS * sizeof(float), cudaMemcpyDeviceToHost));
+        cudaCheckError(cudaMemcpy(hostband, deviceband, fullchans * sizeof(float), cudaMemcpyDeviceToHost));
         std::ofstream bandout("bandpass.dat");
         if (bandout) {
-            for (int ichan = 0; ichan < dadastrings.size() * OUTCHANS; ++ichan) {
+            for (int ichan = 0; ichan < fullchans; ++ichan) {
                 bandout << hostband[ichan] << std::endl;
             }
         }
@@ -590,4 +590,4 @@ int main(int argc, char *argv[]) {
 
     return 0;
 
-}
+}6
