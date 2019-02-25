@@ -78,22 +78,19 @@ __global__ void BandpassKernel(int ntimes, float* __restrict__ powerdata, float*
 
 }
 
-__global__ void MaskKernel(float* __restrict__ powerdata, int* __restrict__ mask, int ntimes, int nchans) {
+__global__ void AdjustKernel(float *powerdata, float *diffs, int nbands, int ntimes) {
 
-    int nbands = nchans / OUTCHANS;
-    
-    // NOTE:
-    __shared__ float partpower[OUTCHANS][8];
-
-
-    for (int iband = 0; iband < nbands; ++iband) {
-
+    float diff = 0.0f;
+    size_t idx = 0;
+    for (int timeidx = blockIdx.x; timeidx < ntimes; timeidx += gridDim.x) {
+        for (int iband = 1; iband < nbands; ++iband) {
+            diff = diffs[iband - 1];
+            idx = timeidx * OUTCHANS * nbands + iband * OUTCHANS + threadIdx.x;
+            powerdata[idx] = powerdata[idx] + diff;
+        }
     }
 
-
-
 }
-
 
  /*
 struct FactorFunctor {

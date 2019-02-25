@@ -4,6 +4,7 @@
 #include <iomanip>
 #include <iostream>
 #include <fstream>
+#include <numeric>
 #include <string>
 #include <utility>
 #include <vector>
@@ -333,12 +334,12 @@ int main(int argc, char *argv[]) {
             dim3 block(OUTCHANS, 1, 1);
             dim3 grid (64, 1, 1);
 
-            UnpackDadaKernel<<<grid, block, 0, 0>>>(remvoltagesamples, reinterpret_cast<uchar4*>(devicevoltage), devicefft);
+            UnpackDadaKernel<<<grid, block, 0, 0>>>(remvoltagesamples * dadastrings.size(), reinterpret_cast<uchar4*>(devicevoltage), devicefft);
             cudaDeviceSynchronize();
             cudaCheckError(cudaGetLastError());
 
             cufftHandle fftplanrem;
-            int fftrembatchsize = remvoltagesamples * 2 / fftsizes[0];
+            int fftrembatchsize = (remvoltagesamples * 2 / fftsizes[0]) * dadastrings.size();
             cufftCheckError(cufftPlanMany(&fftplanrem, 1, fftsizes, NULL, 1, OUTCHANS, NULL, 1, OUTCHANS, CUFFT_C2C, fftrembatchsize));
 
             cufftCheckError(cufftExecC2C(fftplanrem, devicefft, devicefft, CUFFT_FORWARD));
@@ -358,7 +359,7 @@ int main(int argc, char *argv[]) {
             cufftCheckError(cufftDestroy(fftplanrem));
 
             cudaCheckError(cudaMemcpy(fullfil + nblocks * powersize, devicepower,
-                                        remvoltagesamples / OUTCHANS / TIMEAVG * OUTCHANS * sizeof(float) * dadastrings.size(), cudaMemcpyDeviceToHost));
+                                        remtimesamplesout * fullchans * sizeof(float), cudaMemcpyDeviceToHost));
         }
 
         cudaCheckError(cudaMemcpy(hostband, deviceband, fullchans * sizeof(float), cudaMemcpyDeviceToHost));
@@ -377,7 +378,7 @@ int main(int argc, char *argv[]) {
         
         // Saved in the 'middle of range' (rounded up)
         float *medianhostband = new float[OUTCHANS * dadastrings.size()];
-        const int mediansize = 32;
+        int mediansize = 32;
 
         int bandskip = 0;
 
@@ -397,17 +398,42 @@ int main(int argc, char *argv[]) {
 
         }
         
+        // NOTE: Median closer to the band edges
+        // NOTE: Here we run an 8-point running median - allows us to have only 4 points at the edges that need extrapolating
+        mediansize = 8;
+        
+        for (int iband = 0; iband < dadastrings.size(); ++iband) {
+
+            float currentmedian = 0.0f;
+            bandskip = iband * OUTCHANS;
+
+            for (int ichan = 4; ichan < 16; ++ichan) {
+                std::vector<float> subvector(hostband + bandskip + ichan - mediansize / 2, hostband + bandskip + ichan + mediansize / 2);
+                std::sort(subvector.begin(), subvector.end());
+                currentmedian = (subvector.at(4) + subvector.at(3)) / 2.0f;
+                medianhostband[ichan + iband * OUTCHANS] = currentmedian;
+            }
+
+            for (int ichan = OUTCHANS - 16; ichan < OUTCHANS - 4; ++ichan) {
+                std::vector<float> subvector(hostband + bandskip + ichan - mediansize / 2, hostband + bandskip + ichan + mediansize / 2);
+                std::sort(subvector.begin(), subvector.end());
+                currentmedian = (subvector.at(4) + subvector.at(3)) / 2.0f;
+                medianhostband[ichan + iband * OUTCHANS] = currentmedian;
+            }
+
+        }
+
         for (int iband = 0; iband < dadastrings.size(); ++iband) {
         
             bandskip = iband * OUTCHANS;
             // NOTE: Remove the horrible DC compoment artifacts
             hostband[bandskip + 512] = medianhostband[bandskip + 512];
             // NOTE: Start of the band
-            for (int ichan = 15; ichan >= 0; --ichan) {
+            for (int ichan = 3; ichan >= 0; --ichan) {
                 medianhostband[ichan + bandskip] = medianhostband[ichan + bandskip + 1] + (medianhostband[ichan + bandskip + 1] - medianhostband[ichan + bandskip + 2]);
             }
             // NOTE: End of the band
-            for (int ichan = OUTCHANS - 16; ichan < OUTCHANS; ++ichan) {
+            for (int ichan = OUTCHANS - 4; ichan < OUTCHANS; ++ichan) {
                 medianhostband[ichan + bandskip] = medianhostband[ichan + bandskip - 1] + (medianhostband[ichan + bandskip - 1] - medianhostband[ichan + bandskip - 2]);
             }
         }
@@ -421,11 +447,25 @@ int main(int argc, char *argv[]) {
         medianbandout.close();
 
         float banddiff;
+        float fulldiff;
+        std::vector<float> banddiffs;
         for (int iband = 1; iband < dadastrings.size(); ++iband) {
 
-            banddiff = medianhostband[OUTCHANS - 1] - medianhostband[iband * OUTCHANS];
+            banddiff = medianhostband[iband * OUTCHANS - 1] - medianhostband[iband * OUTCHANS];
+
+            if (iband == 1) {
+                banddiffs.push_back(banddiff);
+            } else {
+                banddiffs.push_back(banddiffs.back() + banddiff);
+            }
+            banddiff = banddiffs.back();
+
             std::transform(hostband + iband * OUTCHANS, hostband + (iband + 1) * OUTCHANS,
                             hostband + iband * OUTCHANS,
+                            [banddiff](float val) -> float { return val + banddiff; });            
+
+            std::transform(medianhostband + iband * OUTCHANS, medianhostband + (iband + 1) * OUTCHANS,
+                            medianhostband + iband * OUTCHANS,
                             [banddiff](float val) -> float { return val + banddiff; });            
 
         }
@@ -521,6 +561,11 @@ int main(int argc, char *argv[]) {
             }
         }
 
+        // NOTE: Add DC masking
+        for (int iband = 0; iband < dadastrings.size(); ++iband) {
+            maskedchans.push_back(512 + iband * 1024);
+        }
+
         std::ofstream maskedout("masked_channels.dat");
         for (auto &chan: maskedchans) {
             maskedout << chan << std::endl;
@@ -533,23 +578,25 @@ int main(int argc, char *argv[]) {
         }
         correctedout.close();        
 
-        int* devicemask;
-        cudaCheckError(cudaMalloc((void**)&devicemask, maskedchans.size() * sizeof(int)));
-
-        
-
         // NOTE: Actual cleaning on the
         // NOTE: Need to scale the data somehow as well
-
         // NOTE: This will most likely be slow, very slow
 
         std::chrono::time_point<std::chrono::steady_clock> cleanstart, cleanend;
+
+        size_t fulltimesamples = fullfilsize / fullchans;
+        for (auto &idiff: banddiffs) {
+            idiff /= (float)fulltimesamples;
+        }
+
         cleanstart = std::chrono::steady_clock::now();
         for (auto &ichan: maskedchans) {
 
-            for (size_t isamp = 0; isamp < fullfilsize / (OUTCHANS * dadastrings.size()); ++isamp) {
+            std::cout << "Masking channel " << ichan << "..." << std::endl;
 
-                fullfil[isamp * OUTCHANS * dadastrings.size() + ichan] = hostband[ichan];
+            for (size_t isamp = 0; isamp < fulltimesamples; ++isamp) {
+
+                fullfil[isamp * fullchans + ichan] = hostband[ichan] / (float)fulltimesamples;
 
             }
 
@@ -557,51 +604,71 @@ int main(int argc, char *argv[]) {
         cleanend = std::chrono::steady_clock::now();
 
         std::cout << "Took " << std::chrono::duration<double>(cleanend - cleanstart).count() << "s to clean the data..." << std::endl;
+        //std::cout << "Will write " << fullfilsize * sizeof(float) / 1024.0f / 1024.0f
+		//	<< "MiB to the disk" << std::endl;
+        //filfile.write(reinterpret_cast<char*>(fullfil), fullfilsize * sizeof(float));
+        // NOTE: Need to do stuff on the GPU anyway - need to adjust the band in the original data anyway
+        // NOTE: Need to ajdust if more than one band only 
+        // NOTE: Some of this code is an abomination - move to Thrust
+        if (dadastrings.size() > 1) {
+            
+            float *devicediffs;
+            cudaCheckError(cudaMalloc((void**)&devicediffs, (dadastrings.size() - 1) * sizeof(float)));
+            cudaCheckError(cudaMemcpy(devicediffs, banddiffs.data(), (dadastrings.size() - 1) * sizeof(float), cudaMemcpyHostToDevice));
 
-        std::cout << "Will write " << fullfilsize * sizeof(float) / 1024.0f / 1024.0f
-			<< "MiB to the disk" << std::endl;
-        filfile.write(reinterpret_cast<char*>(fullfil), fullfilsize * sizeof(float));
+            for (int iblock = 0; iblock < nblocks; ++iblock) {
+                
+                std::cout << "Adjusting bands in block " << iblock << " out of " << nblocks << "..." << std::endl;
+                
+                // TODO: Think about copying and processing bands excluding the first one
+                // NOTE: Thats should save 25% of resources
+                cudaCheckError(cudaMemcpy(devicepower, fullfil + iblock * powersize,
+                                            powersize * sizeof(float), cudaMemcpyHostToDevice));
+                
+                dim3 block(OUTCHANS, 1, 1);
+                dim3 grid(64, 1, 1);
+                
+                AdjustKernel<<<grid, block, 0, 0>>>(devicepower, devicediffs, dadastrings.size(), timesamplesperblockout);
+                cudaDeviceSynchronize();                
+                cudaCheckError(cudaGetLastError());            
+                
+                cudaCheckError(cudaMemcpy(fullfil + iblock * powersize, devicepower,
+                                            powersize * sizeof(float), cudaMemcpyDeviceToHost));
+                
+            }
+            
+            if (remvoltagesamples) {
+                
+                std::cout << "Adjusting bands in the remainder block..." << std::endl;
+                
+                cudaCheckError(cudaMemcpy(devicepower, fullfil + nblocks * powersize ,
+                                            remtimesamplesout * OUTCHANS * sizeof(float), cudaMemcpyHostToDevice));
+                
+                dim3 block(OUTCHANS, 1, 1);
+                dim3 grid(64, 1, 1);
+                
+                AdjustKernel<<<grid, block, 0, 0>>>(devicepower, devicediffs, dadastrings.size(), remtimesamplesout);
+                cudaDeviceSynchronize();
+                cudaCheckError(cudaGetLastError());            
+                
+                cudaCheckError(cudaMemcpy(fullfil + nblocks * powersize, devicepower,
+                                            remtimesamplesout * OUTCHANS * sizeof(float), cudaMemcpyDeviceToHost));
+                
+            }
+        
 
-        /*
-        for (int iblock = 0; iblock < nblocks; ++iblock) {
-
-            cudaCheckError(cudaMemcpy(devicepower, fullfil + iblock * powersize * dadastrings.size(),
-                                        powersize * dadastrings.size() * sizeof(float), cudaMemcpyHostToDevice));
-
-            dim3 grid(1, 1, 1);
-            dim3 block(1, 1, 1);
-
-            MaskKernel<<<grid, block, 0, 0>>>(devicepower, devicemask, voltagesamplesperblock / OUTCHANS / TIMEAVG, OUTCHANS * dadastrings.size());
-            cudaCheckError(cudaGetLastError());            
-
-            cudaCheckError(cudaMemcpy(fullfil + iblock * powersize * dadastrings.size(), devicepower,
-                                        powersize * dadastrings.size() * sizeof(float), cudaMemcpyDeviceToHost));
+            cudaCheckError(cudaFree(devicediffs));
 
         }
 
-        if (remvoltagesamples) {
-
-            cudaCheckError(cudaMemcpy(devicepower, fullfil + nblocks * powersize * dadastrings.size(),
-                                        remvoltagesamples / OUTCHANS / TIMEAVG * OUTCHANS * dadastrings.size() * sizeof(float), cudaMemcpyHostToDevice));
-
-            dim3 grid(1, 1, 1);
-            dim3 block(1, 1, 1);
-
-            MaskKernel<<<grid, block, 0, 0>>>(devicepower, devicemask, remvoltagesamples / OUTCHANS / TIMEAVG, OUTCHANS * dadastrings.size());
-            cudaCheckError(cudaGetLastError());            
-
-            cudaCheckError(cudaMemcpy(fullfil + nblocks * powersize * dadastrings.size(), devicepower,
-                                        remvoltagesamples / OUTCHANS / TIMEAVG * OUTCHANS * dadastrings.size() * sizeof(float), cudaMemcpyDeviceToHost));
-
-        }
-        */
         cudaCheckError(cudaGetLastError());
 
         /**** ####
         // STAGE: Save the final filterbank file
         #### ****/
-
-
+        std::cout << "Will write " << fullfilsize * sizeof(float) / 1024.0f / 1024.0f
+			<< "MiB to the disk" << std::endl;
+        filfile.write(reinterpret_cast<char*>(fullfil), fullfilsize * sizeof(float));
 
         /**** ####
         // STAGE: CLEANING UP
@@ -613,7 +680,6 @@ int main(int argc, char *argv[]) {
 
         filfile.close();
 
-        cudaFree(devicemask);
         cudaFree(deviceband);
         cudaFree(devicepower);
         cudaFree(devicefft);
@@ -627,6 +693,8 @@ int main(int argc, char *argv[]) {
         delete [] hostvoltage;
 
     } 
+
+    cudaCheckError(cudaDeviceReset());
 
     return 0;
 
