@@ -53,13 +53,13 @@ int main(int argc, char *argv[]) {
     string outfil = "";
     string config = "";
     string dadastr = "";
-    double readsec; 
+    //double readsec; 
     bool scaling = false;
-    bool saveinter = false;
+    //bool saveinter = false;
 
     std::vector<std::string> dadastrings; 
 
-    if ((argc < 5) || (argv[1] == "-h") || (argv[1] == "--help")) {
+    if ((argc < 5) || (std::string(argv[1]) == "-h") || (std::string(argv[1]) == "--help")) {
         cout << "Incorrect number of arguments!" << endl;
         cout << "Command line options:" << endl
                 << "-a <filename> - input file for polarisation a" << endl
@@ -69,7 +69,7 @@ int main(int argc, char *argv[]) {
                 << "-c <filename> - input configuration file" << endl
                 << "-r <number> - number of seconds to process - CURRENTLY NOT WORKING" << endl
                 << "-s - enable scaling from 32 bits to 8 bits" << endl
-                << "-i - enable saving the intermediate data products" << endl
+                << "-i - enable saving the intermediate data products - CURRENTLY NOT WORKING" << endl
                 << "-h, --help - display this message" << endl;
         exit(EXIT_SUCCESS);
     }
@@ -96,13 +96,13 @@ int main(int argc, char *argv[]) {
         } else if (std::string(argv[iarg]) == "-s") {
             cout << "Will scale the data to 8 bits" << endl;
             scaling = true;
-        } else if (std::string(argv[iarg]) == "-i") {
-            cout << "Will save the intermediate products" << endl;
-            saveinter = true;
-        } else if (std::string(argv[iarg]) == "-r") {
-            iarg++;
-            readsec = std::stod(argv[iarg]);
-        }
+        } // else if (std::string(argv[iarg]) == "-i") {
+        //     cout << "Will save the intermediate products" << endl;
+        //     saveinter = true;
+        // } else if (std::string(argv[iarg]) == "-r") {
+        //     iarg++;
+        //     readsec = std::stod(argv[iarg]);
+        // }
     }
 
     if (!inpola.empty() && !dadastr.empty()) {
@@ -120,7 +120,7 @@ int main(int argc, char *argv[]) {
             }
         std::cout << std::endl;
         
-        long long filesize = 0;
+        size_t filesize = 0;
 
         for (auto &dadastring: dadastrings) {
             std::ifstream indada(dadastring.c_str(), std::ios_base::binary);
@@ -363,12 +363,18 @@ int main(int argc, char *argv[]) {
         }
 
         cudaCheckError(cudaMemcpy(hostband, deviceband, fullchans * sizeof(float), cudaMemcpyDeviceToHost));
+
+        size_t fulltimesamples = fullfilsize / fullchans;
+        std::transform(hostband, hostband + fullchans,
+                        hostband, [fulltimesamples](float band) -> float {return band / (float)fulltimesamples;} );
+        
         std::ofstream bandout("bandpass.dat");
         if (bandout) {
             for (int ichan = 0; ichan < fullchans; ++ichan) {
                 bandout << hostband[ichan] << std::endl;
             }
         }
+
         bandout.close();
 
         // NOTE: Quick and dirty bandpass cleaning
@@ -447,17 +453,18 @@ int main(int argc, char *argv[]) {
         medianbandout.close();
 
         float banddiff;
-        float fulldiff;
         std::vector<float> banddiffs;
+        banddiffs.push_back(0.0f);
         for (int iband = 1; iband < dadastrings.size(); ++iband) {
 
             banddiff = medianhostband[iband * OUTCHANS - 1] - medianhostband[iband * OUTCHANS];
 
-            if (iband == 1) {
-                banddiffs.push_back(banddiff);
-            } else {
-                banddiffs.push_back(banddiffs.back() + banddiff);
-            }
+            // if (iband == 1) {
+            //     banddiffs.push_back(banddiff);
+            // } else {
+            //     banddiffs.push_back(banddiffs.back() + banddiff);
+            // }
+            banddiffs.push_back(banddiffs.back() + banddiff);
             banddiff = banddiffs.back();
 
             std::transform(hostband + iband * OUTCHANS, hostband + (iband + 1) * OUTCHANS,
@@ -477,6 +484,13 @@ int main(int argc, char *argv[]) {
             }
         }
         adjbandout.close();
+
+        std::ofstream adjmedout("adjusted_median_band.dat");
+        if (adjmedout) {
+            for (int ichan = 0; ichan < fullchans; ++ ichan) {
+                adjmedout << medianhostband[ichan] << std::endl;
+            }
+        }
 
         // NOTE: And now get the running median of 32 channels
       
@@ -584,19 +598,15 @@ int main(int argc, char *argv[]) {
 
         std::chrono::time_point<std::chrono::steady_clock> cleanstart, cleanend;
 
-        size_t fulltimesamples = fullfilsize / fullchans;
-        for (auto &idiff: banddiffs) {
-            idiff /= (float)fulltimesamples;
-        }
-
         cleanstart = std::chrono::steady_clock::now();
         for (auto &ichan: maskedchans) {
 
-            std::cout << "Masking channel " << ichan << "..." << std::endl;
+            int band = ichan / OUTCHANS;
 
+            std::cout << "Masking channel " << ichan << "..." << std::endl;
             for (size_t isamp = 0; isamp < fulltimesamples; ++isamp) {
 
-                fullfil[isamp * fullchans + ichan] = hostband[ichan] / (float)fulltimesamples;
+                fullfil[isamp * fullchans + ichan] = hostband[ichan] - banddiffs.at(band);
 
             }
 
@@ -614,7 +624,7 @@ int main(int argc, char *argv[]) {
             
             float *devicediffs;
             cudaCheckError(cudaMalloc((void**)&devicediffs, (dadastrings.size() - 1) * sizeof(float)));
-            cudaCheckError(cudaMemcpy(devicediffs, banddiffs.data(), (dadastrings.size() - 1) * sizeof(float), cudaMemcpyHostToDevice));
+            cudaCheckError(cudaMemcpy(devicediffs, &banddiffs[1], (dadastrings.size() - 1) * sizeof(float), cudaMemcpyHostToDevice));
 
             for (int iblock = 0; iblock < nblocks; ++iblock) {
                 
