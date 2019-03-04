@@ -78,7 +78,7 @@ __global__ void BandpassKernel(int ntimes, float* __restrict__ powerdata, float*
 
 }
 
-__global__ void AdjustKernel(float *powerdata, float *diffs, int nbands, int ntimes, float datamin, float scale, int runscale) {
+__global__ void AdjustKernel(float* __restrict__ powerdata, unsigned char* __restrict__ scaledpower, float* __restrict__ diffs, int nbands, int ntimes, float datamin, float scale, int runscale) {
 
     float diff = 0.0f;
     float tmp = 0.0f;
@@ -88,7 +88,7 @@ __global__ void AdjustKernel(float *powerdata, float *diffs, int nbands, int nti
             diff = diffs[iband];
             idx = timeidx * OUTCHANS * nbands + iband * OUTCHANS + threadIdx.x;
             tmp = powerdata[idx];
-            if (runscale) {
+            if (runscale > 0) {
                 tmp = (tmp + diff - datamin) * scale;
                 // NOTE: Divergent warp because why not!
                 if (tmp < 0.0f) {
@@ -96,9 +96,18 @@ __global__ void AdjustKernel(float *powerdata, float *diffs, int nbands, int nti
                 } else if (tmp > 255.0f) {
                     tmp = 255.0f;
                 }
-                powerdata[idx] = tmp;
-            } else {
+                scaledpower[idx] = static_cast<unsigned char>(tmp);
+            } else if (runscale == 0) {
                 powerdata[idx] = tmp + diff;
+            } else if (runscale == -1) {
+                tmp = (tmp - datamin) * scale;
+                // NOTE: Divergent warp because why not!
+                if (tmp < 0.0f) {
+                    tmp = 0.0f;
+                } else if (tmp > 255.0f) {
+                    tmp = 255.0f;
+                }
+                scaledpower[idx] = static_cast<unsigned char>(tmp);
             }
         }
     }

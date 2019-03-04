@@ -11,6 +11,6 @@ __global__ void BandpassKernel(int ntimes, float* __restrict__ powerdata, float*
 
 __global__ void MaskKernel(float* __restrict__ powerdata, int* __restrict__ mask, int ntimes, int nchans);
 
-__global__ void AdjustKernel(float *powerdata, float *diffs, int nbands, int ntimes, float datamin, float scale, int runscale);
+__global__ void AdjustKernel(float* __restrict__ powerdata, unsigned char* __restrict__ scaledpower, float* __restrict__ diffs, int nbands, int ntimes, float datamin, float scale, int runscale);
 
 #endif

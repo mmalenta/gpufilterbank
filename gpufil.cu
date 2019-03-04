@@ -24,14 +24,6 @@
 #include "filterbank.hpp"
 #include "kernels.cuh"
 
-using std::cerr;
-using std::cout;
-using std::endl;
-using std::ifstream;
-using std::ofstream;
-using std::string;
-using std::vector;
-
 struct FrameInfo {
     unsigned int frameno;
     unsigned int refsecond;
@@ -49,29 +41,26 @@ struct Timing {
 
 int main(int argc, char *argv[]) {
 
-    string inpola = "";
-    string inpolb = "";
-    string outfil = "";
-    string config = "";
-    string dadastr = "";
-    //double readsec; 
+    std::string inpola = "";
+    std::string inpolb = "";
+    std::string outfil = "";
+    std::string config = "";
+    std::string dadastr = "";
     bool scaling = false;
-    //bool saveinter = false;
-
     std::vector<std::string> dadastrings; 
 
     if ((argc < 5) || (std::string(argv[1]) == "-h") || (std::string(argv[1]) == "--help")) {
-        cout << "Incorrect number of arguments!" << endl;
-        cout << "Command line options:" << endl
-                << "-a <filename> - input file for polarisation a" << endl
-                << "-b <filename> - input file for polarisation b" << endl
-                << "-d <filename> - input DADA file" << endl
-                << "-o <filename> - output filterbank file" << endl
-                << "-c <filename> - input configuration file" << endl
-                << "-r <number> - number of seconds to process - CURRENTLY NOT WORKING" << endl
-                << "-s - enable scaling from 32 bits to 8 bits" << endl
-                << "-i - enable saving the intermediate data products - CURRENTLY NOT WORKING" << endl
-                << "-h, --help - display this message" << endl;
+        std::cout << "Incorrect number of arguments!\n";
+        std::cout << "Command line options:\n"
+                << "-a <filename> - input file for polarisation a\n"
+                << "-b <filename> - input file for polarisation b\n"
+                << "-d <filename> - input DADA file\n"
+                << "-o <filename> - output filterbank file\n"
+                << "-c <filename> - input configuration file\n"
+                << "-r <number> - number of seconds to process - CURRENTLY NOT WORKING\n"
+                << "-s - enable scaling from 32 bits to 8 bits\n"
+                << "-i - enable saving the intermediate data products - CURRENTLY NOT WORKING\n"
+                << "-h, --help - display this message\n" << std::flush;
         exit(EXIT_SUCCESS);
     }
 
@@ -83,6 +72,7 @@ int main(int argc, char *argv[]) {
             iarg++;
             inpolb = std::string(argv[iarg]);
         } else if (std::string(argv[iarg]) == "-d") {
+            // NOTE: Currently assumes we will use 4 subbands all the time
             for (int ifile = 0; ifile < 4; ++ifile) {
                 iarg++;
                 dadastr = std::string(argv[iarg]);
@@ -95,19 +85,13 @@ int main(int argc, char *argv[]) {
             iarg++;
             config = std::string(argv[iarg]);
         } else if (std::string(argv[iarg]) == "-s") {
-            cout << "Will scale the data to 8 bits" << endl;
+            std::cout << "Will scale the data to 8 bits\n";
             scaling = true;
-        } // else if (std::string(argv[iarg]) == "-i") {
-        //     cout << "Will save the intermediate products" << endl;
-        //     saveinter = true;
-        // } else if (std::string(argv[iarg]) == "-r") {
-        //     iarg++;
-        //     readsec = std::stod(argv[iarg]);
-        // }
+        }
     }
 
     if (!inpola.empty() && !dadastr.empty()) {
-        cerr << "It's one or the other: DADA or VDIF, not both!" << endl;
+        std::cerr << "It's one or the other: DADA or VDIF, not both!\n" << std::flush;
         return 1;
     }
 
@@ -122,7 +106,6 @@ int main(int argc, char *argv[]) {
         std::cout << std::endl;
         
         size_t filesize = 0;
-
         for (auto &dadastring: dadastrings) {
             std::ifstream indada(dadastring.c_str(), std::ios_base::binary);
 
@@ -146,12 +129,6 @@ int main(int argc, char *argv[]) {
 
         }
 
-        /* std::ifstream indada(dadastr.c_str(), std::ios_base::binary);        
-        long long filesize = 0;
-        indada.seekg(0, indada.end);
-        filesize = indada.tellg() - 4096L;
-        indada.seekg(0, indada.beg);
-        */ 
         // NOTE: 4 bytes per full time sample: 1 byte sampling, 2 polarisations, complex number
         size_t voltagesamples = filesize / 4;
         if (filesize != voltagesamples * 4) {
@@ -250,16 +227,6 @@ int main(int argc, char *argv[]) {
 
         for (int ifile = 0; ifile < dadastrings.size(); ++ifile) {
 
-            //dadastreams.push_back(std::move(std::ifstream()));
-
-            //dadastreams.back().open(dadastrings.at(ifile).c_str(), std::ios_base::binary);
-            //dadastreams.emplace_back(std::ifstream(dadastrings.at(ifile).c_str(), std::ios_base::binary));
-
-            // std::ifstream indada(dadastrings.at(ifile).c_str(), std::ios_base::binary);
-           
-            //std::ifstream dadafile(dadastrings.at(ifile).c_str(), std::ios_base::binary);
-            //dadastreams.push_back(std::move(dadafile));
-
             std::shared_ptr<std::ifstream> dadafile(new std::ifstream);
             dadafile -> open(dadastrings.at(ifile).c_str(), std::ios_base::binary);
             dadastreams.push_back(dadafile);
@@ -284,15 +251,11 @@ int main(int argc, char *argv[]) {
 
         }
 
-        std::ofstream filfile(outfil.c_str(), std::ios_base::binary);
-        //WriteFilterbankHeader(filfile, filhead);
-
-
         // NOTE: So this approach has an extra complication that it does the baseband calculation and filtering over the whole input file
         // NOTE: This is not ideal as it requires multiple copies between host and devices, but avoids the situation when the input data is divided into too many blocks
         for (int iblock = 0; iblock < nblocks; iblock++) {
 
-            std::cout << "Processing block " << iblock << "..." << std::endl;
+            std::cout << "Processing block " << iblock << " out of " << nblocks << "..." << std::endl;
 
             for (int ifile = 0; ifile < dadastrings.size(); ++ifile) {
                 std::cout << "Reading file " << dadastrings.at(ifile) << "..." << std::endl;
@@ -333,8 +296,7 @@ int main(int argc, char *argv[]) {
             std::cout << "Processing the remainder block..." << std::endl;
 
             for (int ifile = 0; ifile < dadastrings.size(); ++ifile) {
-                std::cout << "Reading file " << dadastrings.at(ifile) << "..." << std::endl;
-               
+                //std::cout << "Reading file " << dadastrings.at(ifile) << "..." << std::endl;
                 dadastreams.at(ifile) -> read(reinterpret_cast<char*>(hostvoltage + ifile * perfilerem), perfilerem * sizeof(unsigned char));
             }
 
@@ -386,27 +348,25 @@ int main(int argc, char *argv[]) {
 
         bandout.close();
 
-        // NOTE: Quick and dirty bandpass cleaning
-        // NOTE: First adjust the levels between different bands
-
-        // NOTE: This cannot be done here - there's a possibility of massive RFI at the ends of bands
-        
-        // Saved in the 'middle of range' (rounded up)
+        /**** ####
+        // STAGE: CLEAN BANDPASS ESTIMATION AND BAD CHANNELS FLAGGING
+        #### ****/
         float *medianhostband = new float[OUTCHANS * dadastrings.size()];
         int mediansize = 32;
 
         int bandskip = 0;
+        float currentmedian = 0.0f;
 
         for (int iband = 0; iband < dadastrings.size(); ++iband) {
 
-            float currentmedian = 0.0f;
             bandskip = iband * OUTCHANS;
 
-            for (int ichan = 16; ichan < OUTCHANS - 16; ++ichan) {
+            for (int ichan = mediansize / 2; ichan < OUTCHANS - mediansize / 2; ++ichan) {
                 
-                std::vector<float> subvector(hostband + bandskip + ichan - 16, hostband + bandskip + ichan + 16);
+                std::vector<float> subvector(hostband + bandskip + ichan - mediansize / 2, hostband + bandskip + ichan + mediansize / 2);
                 std::sort(subvector.begin(), subvector.end());
-                currentmedian = (subvector.at(16) + subvector.at(15)) / 2.0f;
+                // NOTE: This assumes that we run even-length median window
+                currentmedian = (subvector.at(mediansize / 2) + subvector.at(mediansize / 2 - 1)) / 2.0f;
                 medianhostband[ichan + iband * OUTCHANS] = currentmedian;
     
             }
@@ -419,23 +379,21 @@ int main(int argc, char *argv[]) {
         
         for (int iband = 0; iband < dadastrings.size(); ++iband) {
 
-            float currentmedian = 0.0f;
             bandskip = iband * OUTCHANS;
 
             for (int ichan = 4; ichan < 16; ++ichan) {
                 std::vector<float> subvector(hostband + bandskip + ichan - mediansize / 2, hostband + bandskip + ichan + mediansize / 2);
                 std::sort(subvector.begin(), subvector.end());
-                currentmedian = (subvector.at(4) + subvector.at(3)) / 2.0f;
+                currentmedian = (subvector.at(mediansize / 2) + subvector.at(mediansize / 2 - 1)) / 2.0f;
                 medianhostband[ichan + iband * OUTCHANS] = currentmedian;
             }
 
             for (int ichan = OUTCHANS - 16; ichan < OUTCHANS - 4; ++ichan) {
                 std::vector<float> subvector(hostband + bandskip + ichan - mediansize / 2, hostband + bandskip + ichan + mediansize / 2);
                 std::sort(subvector.begin(), subvector.end());
-                currentmedian = (subvector.at(4) + subvector.at(3)) / 2.0f;
+                currentmedian = (subvector.at(mediansize / 2) + subvector.at(mediansize / 2 - 1)) / 2.0f;
                 medianhostband[ichan + iband * OUTCHANS] = currentmedian;
             }
-
         }
 
         for (int iband = 0; iband < dadastrings.size(); ++iband) {
@@ -467,12 +425,6 @@ int main(int argc, char *argv[]) {
         for (int iband = 1; iband < dadastrings.size(); ++iband) {
 
             banddiff = medianhostband[iband * OUTCHANS - 1] - medianhostband[iband * OUTCHANS];
-
-            // if (iband == 1) {
-            //     banddiffs.push_back(banddiff);
-            // } else {
-            //     banddiffs.push_back(banddiffs.back() + banddiff);
-            // }
             banddiffs.push_back(banddiffs.back() + banddiff);
             banddiff = banddiffs.back();
 
@@ -501,11 +453,6 @@ int main(int argc, char *argv[]) {
             }
         }
 
-        // NOTE: And now get the running median of 32 channels
-      
-        // NOTE: And now take care of leftover samples from the median at the start and end of the band
-        // NOTE: Uses very simple linear interpolation - might move to something more sophisticated later, but this seems to do the job for now
-        
         float *normalisedband = new float[OUTCHANS * dadastrings.size()];
         
         std::transform(hostband, hostband + OUTCHANS * dadastrings.size(), 
@@ -601,9 +548,6 @@ int main(int argc, char *argv[]) {
         }
         correctedout.close();        
 
-        // NOTE: Actual cleaning on the
-        // NOTE: Need to scale the data somehow as well
-        // NOTE: This will most likely be slow, very slow
         std::chrono::time_point<std::chrono::steady_clock> cleanstart, cleanend;
         cleanstart = std::chrono::steady_clock::now();
         for (auto &ichan: maskedchans) {
@@ -636,6 +580,8 @@ int main(int argc, char *argv[]) {
             float *devicediffs;
             cudaCheckError(cudaMalloc((void**)&devicediffs, dadastrings.size() * sizeof(float)));
             cudaCheckError(cudaMemcpy(devicediffs, &banddiffs[0], dadastrings.size() * sizeof(float), cudaMemcpyHostToDevice));
+            unsigned char *scaledpower;
+            cudaCheckError(cudaMalloc((void**)&scaledpower, powersize * sizeof(float)));
 
             for (int iblock = 0; iblock < nblocks; ++iblock) {
                 
@@ -647,16 +593,17 @@ int main(int argc, char *argv[]) {
                 dim3 block(OUTCHANS, 1, 1);
                 dim3 grid(64, 1, 1);
                 
-                AdjustKernel<<<grid, block, 0, 0>>>(devicepower, devicediffs, dadastrings.size(), timesamplesperblockout, datamin, scaling, iblock);
+                AdjustKernel<<<grid, block, 0, 0>>>(devicepower, scaledpower, devicediffs, dadastrings.size(), timesamplesperblockout, datamin, scaling, iblock);
                 cudaDeviceSynchronize();                
                 cudaCheckError(cudaGetLastError());            
-                
-                cudaCheckError(cudaMemcpy(fullfil + iblock * powersize, devicepower,
-                                            powersize * sizeof(float), cudaMemcpyDeviceToHost));
 
                 // NOTE: This is an abomination
                 // NOTE: I assume that the data in the first block is representative of the entire dataset
                 if (iblock == 0) {
+
+                    cudaCheckError(cudaMemcpy(fullfil, devicepower,
+                        powersize / sizeof(float) * sizeof(float), cudaMemcpyDeviceToHost));
+                
                     std::chrono::time_point<std::chrono::steady_clock> minmaxstart, minmaxend;
                     minmaxstart = std::chrono::steady_clock::now();
                     datamin = *(std::min_element(fullfil, fullfil + powersize));
@@ -666,13 +613,13 @@ int main(int argc, char *argv[]) {
                                     "MIN: " << datamin << ", MAX: " << datamax << std::endl;
                     scaling = 255.0 / (datamax - datamin);
                 
-                    AdjustKernel<<<grid, block, 0, 0>>>(devicepower, devicediffs, dadastrings.size(), timesamplesperblockout, datamin, scaling, 1);
+                    AdjustKernel<<<grid, block, 0, 0>>>(devicepower, scaledpower, devicediffs, dadastrings.size(), timesamplesperblockout, datamin, scaling, -1);
                     cudaDeviceSynchronize();                
                     cudaCheckError(cudaGetLastError());            
-                    
-                    cudaCheckError(cudaMemcpy(fullfil, devicepower,
-                                                powersize * sizeof(float), cudaMemcpyDeviceToHost));
                 }
+
+                cudaCheckError(cudaMemcpy(reinterpret_cast<unsigned char*>(fullfil) + iblock * powersize, scaledpower,
+                    powersize * sizeof(unsigned char), cudaMemcpyDeviceToHost));
             }
             
             if (remvoltagesamples) {
@@ -685,25 +632,31 @@ int main(int argc, char *argv[]) {
                 dim3 block(OUTCHANS, 1, 1);
                 dim3 grid(64, 1, 1);
                 
-                std::cout << "datamin: " << datamin << ", scaling: " << scaling << std::endl;
-                AdjustKernel<<<grid, block, 0, 0>>>(devicepower, devicediffs, dadastrings.size(), remtimesamplesout, datamin, scaling, 1);
+                AdjustKernel<<<grid, block, 0, 0>>>(devicepower, scaledpower, devicediffs, dadastrings.size(), remtimesamplesout, datamin, scaling, 1);
                 cudaDeviceSynchronize();
                 cudaCheckError(cudaGetLastError());            
                 
-                cudaCheckError(cudaMemcpy(fullfil + nblocks * powersize, devicepower,
-                                            remtimesamplesout * fullchans * sizeof(float), cudaMemcpyDeviceToHost));
+                cudaCheckError(cudaMemcpy(reinterpret_cast<unsigned char*>(fullfil) + nblocks * powersize, scaledpower,
+                                            remtimesamplesout * fullchans * sizeof(unsigned char), cudaMemcpyDeviceToHost));
                 
             }
+            cudaCheckError(cudaFree(scaledpower));
             cudaCheckError(cudaFree(devicediffs));
+
         }
         cudaCheckError(cudaGetLastError());
 
         /**** ####
         // STAGE: Save the final filterbank file
         #### ****/
-        std::cout << "Will write " << fullfilsize * sizeof(float) / 1024.0f / 1024.0f
-			<< "MiB to the disk" << std::endl;
-        filfile.write(reinterpret_cast<char*>(fullfil), fullfilsize * sizeof(float));
+        std::cout << "Will write " << fullfilsize * sizeof(unsigned char) / 1024.0f / 1024.0f
+            << "MiB to the disk\n" << std::flush;
+        std::ofstream filfile(outfil.c_str(), std::ios_base::binary);
+        FilHead filhead = filheaders.back();
+        // NOTE: Move to the centre of top channel
+        filhead.fch1 = filhead.fch1 - 0.5 * fabs(filhead.foff);
+        WriteFilterbankHeader(filfile, filhead);
+        filfile.write(reinterpret_cast<char*>(fullfil), fullfilsize * sizeof(unsigned char));
 
         /**** ####
         // STAGE: CLEANING UP
