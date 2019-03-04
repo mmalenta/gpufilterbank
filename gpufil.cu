@@ -595,9 +595,7 @@ int main(int argc, char *argv[]) {
         // NOTE: Actual cleaning on the
         // NOTE: Need to scale the data somehow as well
         // NOTE: This will most likely be slow, very slow
-
         std::chrono::time_point<std::chrono::steady_clock> cleanstart, cleanend;
-
         cleanstart = std::chrono::steady_clock::now();
         for (auto &ichan: maskedchans) {
 
@@ -612,39 +610,60 @@ int main(int argc, char *argv[]) {
 
         }
         cleanend = std::chrono::steady_clock::now();
-
         std::cout << "Took " << std::chrono::duration<double>(cleanend - cleanstart).count() << "s to clean the data..." << std::endl;
+        
         //std::cout << "Will write " << fullfilsize * sizeof(float) / 1024.0f / 1024.0f
 		//	<< "MiB to the disk" << std::endl;
         //filfile.write(reinterpret_cast<char*>(fullfil), fullfilsize * sizeof(float));
         // NOTE: Need to do stuff on the GPU anyway - need to adjust the band in the original data anyway
         // NOTE: Need to ajdust if more than one band only 
         // NOTE: Some of this code is an abomination - move to Thrust
+        float datamin = 0.0f;
+        float datamax = 0.0f;
+        float scaling = 0.0f;
+
         if (dadastrings.size() > 1) {
             
             float *devicediffs;
-            cudaCheckError(cudaMalloc((void**)&devicediffs, (dadastrings.size() - 1) * sizeof(float)));
-            cudaCheckError(cudaMemcpy(devicediffs, &banddiffs[1], (dadastrings.size() - 1) * sizeof(float), cudaMemcpyHostToDevice));
+            cudaCheckError(cudaMalloc((void**)&devicediffs, dadastrings.size() * sizeof(float)));
+            cudaCheckError(cudaMemcpy(devicediffs, &banddiffs[0], dadastrings.size() * sizeof(float), cudaMemcpyHostToDevice));
 
             for (int iblock = 0; iblock < nblocks; ++iblock) {
                 
                 std::cout << "Adjusting bands in block " << iblock << " out of " << nblocks << "..." << std::endl;
                 
-                // TODO: Think about copying and processing bands excluding the first one
-                // NOTE: Thats should save 25% of resources
                 cudaCheckError(cudaMemcpy(devicepower, fullfil + iblock * powersize,
                                             powersize * sizeof(float), cudaMemcpyHostToDevice));
                 
                 dim3 block(OUTCHANS, 1, 1);
                 dim3 grid(64, 1, 1);
                 
-                AdjustKernel<<<grid, block, 0, 0>>>(devicepower, devicediffs, dadastrings.size(), timesamplesperblockout);
+                AdjustKernel<<<grid, block, 0, 0>>>(devicepower, devicediffs, dadastrings.size(), timesamplesperblockout, datamin, scaling, iblock);
                 cudaDeviceSynchronize();                
                 cudaCheckError(cudaGetLastError());            
                 
                 cudaCheckError(cudaMemcpy(fullfil + iblock * powersize, devicepower,
                                             powersize * sizeof(float), cudaMemcpyDeviceToHost));
+
+                // NOTE: This is an abomination
+                // NOTE: I assume that the data in the first block is representative of the entire dataset
+                if (iblock == 0) {
+                    std::chrono::time_point<std::chrono::steady_clock> minmaxstart, minmaxend;
+                    minmaxstart = std::chrono::steady_clock::now();
+                    datamin = *(std::min_element(fullfil, fullfil + powersize));
+                    datamax = *(std::max_element(fullfil, fullfil + powersize));
+                    minmaxend = std::chrono::steady_clock::now();
+                    std::cout << "Took " << std::chrono::duration<double>(minmaxend - minmaxstart).count() << "s to find min/max of the data...\n" 
+                                    "MIN: " << datamin << ", MAX: " << datamax << std::endl;
+                    scaling = 255.0 / (datamax - datamin);
                 
+                    AdjustKernel<<<grid, block, 0, 0>>>(devicepower, devicediffs, dadastrings.size(), timesamplesperblockout, datamin, scaling, 1);
+                    cudaDeviceSynchronize();                
+                    cudaCheckError(cudaGetLastError());            
+                    
+                    cudaCheckError(cudaMemcpy(fullfil, devicepower,
+                                                powersize * sizeof(float), cudaMemcpyDeviceToHost));
+                }
             }
             
             if (remvoltagesamples) {
@@ -652,25 +671,22 @@ int main(int argc, char *argv[]) {
                 std::cout << "Adjusting bands in the remainder block..." << std::endl;
                 
                 cudaCheckError(cudaMemcpy(devicepower, fullfil + nblocks * powersize ,
-                                            remtimesamplesout * OUTCHANS * sizeof(float), cudaMemcpyHostToDevice));
+                                            remtimesamplesout * fullchans * sizeof(float), cudaMemcpyHostToDevice));
                 
                 dim3 block(OUTCHANS, 1, 1);
                 dim3 grid(64, 1, 1);
                 
-                AdjustKernel<<<grid, block, 0, 0>>>(devicepower, devicediffs, dadastrings.size(), remtimesamplesout);
+                std::cout << "datamin: " << datamin << ", scaling: " << scaling << std::endl;
+                AdjustKernel<<<grid, block, 0, 0>>>(devicepower, devicediffs, dadastrings.size(), remtimesamplesout, datamin, scaling, 1);
                 cudaDeviceSynchronize();
                 cudaCheckError(cudaGetLastError());            
                 
                 cudaCheckError(cudaMemcpy(fullfil + nblocks * powersize, devicepower,
-                                            remtimesamplesout * OUTCHANS * sizeof(float), cudaMemcpyDeviceToHost));
+                                            remtimesamplesout * fullchans * sizeof(float), cudaMemcpyDeviceToHost));
                 
             }
-        
-
             cudaCheckError(cudaFree(devicediffs));
-
         }
-
         cudaCheckError(cudaGetLastError());
 
         /**** ####

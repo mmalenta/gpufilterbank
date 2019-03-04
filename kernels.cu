@@ -78,15 +78,28 @@ __global__ void BandpassKernel(int ntimes, float* __restrict__ powerdata, float*
 
 }
 
-__global__ void AdjustKernel(float *powerdata, float *diffs, int nbands, int ntimes) {
+__global__ void AdjustKernel(float *powerdata, float *diffs, int nbands, int ntimes, float datamin, float scale, int runscale) {
 
     float diff = 0.0f;
+    float tmp = 0.0f;
     size_t idx = 0;
     for (int timeidx = blockIdx.x; timeidx < ntimes; timeidx += gridDim.x) {
-        for (int iband = 1; iband < nbands; ++iband) {
-            diff = diffs[iband - 1];
+        for (int iband = 0; iband < nbands; ++iband) {
+            diff = diffs[iband];
             idx = timeidx * OUTCHANS * nbands + iband * OUTCHANS + threadIdx.x;
-            powerdata[idx] = powerdata[idx] + diff;
+            tmp = powerdata[idx];
+            if (runscale) {
+                tmp = (tmp + diff - datamin) * scale;
+                // NOTE: Divergent warp because why not!
+                if (tmp < 0.0f) {
+                    tmp = 0.0f;
+                } else if (tmp > 255.0f) {
+                    tmp = 255.0f;
+                }
+                powerdata[idx] = tmp;
+            } else {
+                powerdata[idx] = tmp + diff;
+            }
         }
     }
 
