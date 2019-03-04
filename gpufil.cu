@@ -4,6 +4,7 @@
 #include <iomanip>
 #include <iostream>
 #include <fstream>
+#include <memory>
 #include <numeric>
 #include <string>
 #include <utility>
@@ -245,18 +246,26 @@ int main(int argc, char *argv[]) {
         float *fullfil = new float[fullfilsize];
 
         std::vector<FilHead> filheaders;
-        std::vector<std::ifstream> dadastreams;
+        std::vector<std::shared_ptr<std::ifstream>> dadastreams;
 
         for (int ifile = 0; ifile < dadastrings.size(); ++ifile) {
 
-            dadastreams.push_back(std::ifstream());
+            //dadastreams.push_back(std::move(std::ifstream()));
 
-            dadastreams.back().open(dadastrings.at(ifile).c_str(), std::ios_base::binary);
+            //dadastreams.back().open(dadastrings.at(ifile).c_str(), std::ios_base::binary);
+            //dadastreams.emplace_back(std::ifstream(dadastrings.at(ifile).c_str(), std::ios_base::binary));
 
             // std::ifstream indada(dadastrings.at(ifile).c_str(), std::ios_base::binary);
-            
+           
+            //std::ifstream dadafile(dadastrings.at(ifile).c_str(), std::ios_base::binary);
+            //dadastreams.push_back(std::move(dadafile));
+
+            std::shared_ptr<std::ifstream> dadafile(new std::ifstream);
+            dadafile -> open(dadastrings.at(ifile).c_str(), std::ios_base::binary);
+            dadastreams.push_back(dadafile);
+ 
             FilHead filhead = {};
-            ReadDadaHeader(dadastreams.back(), filhead);
+            ReadDadaHeader(*dadastreams.back(), filhead);
 
             if (!scaling) {
                 filhead.nbits = 32;
@@ -271,7 +280,7 @@ int main(int argc, char *argv[]) {
             PrintFilterbankHeader(filheaders.at(ifile));
             
             // NOTE: Just in case I did something wrong
-            dadastreams.back().seekg(4096, dadastreams.back().beg);
+            dadastreams.back() -> seekg(4096, dadastreams.back() -> beg);
 
         }
 
@@ -287,7 +296,7 @@ int main(int argc, char *argv[]) {
 
             for (int ifile = 0; ifile < dadastrings.size(); ++ifile) {
                 std::cout << "Reading file " << dadastrings.at(ifile) << "..." << std::endl;
-                dadastreams.at(ifile).read(reinterpret_cast<char*>(hostvoltage + ifile * perfileread), perfileread * sizeof(unsigned char));
+                dadastreams.at(ifile) -> read(reinterpret_cast<char*>(hostvoltage + ifile * perfileread), perfileread * sizeof(unsigned char));
             }
 
             cudaCheckError(cudaMemcpy(devicevoltage, hostvoltage, blockread * sizeof(unsigned char), cudaMemcpyHostToDevice));
@@ -326,7 +335,7 @@ int main(int argc, char *argv[]) {
             for (int ifile = 0; ifile < dadastrings.size(); ++ifile) {
                 std::cout << "Reading file " << dadastrings.at(ifile) << "..." << std::endl;
                
-                dadastreams.at(ifile).read(reinterpret_cast<char*>(hostvoltage + ifile * perfilerem), perfilerem * sizeof(unsigned char));
+                dadastreams.at(ifile) -> read(reinterpret_cast<char*>(hostvoltage + ifile * perfilerem), perfilerem * sizeof(unsigned char));
             }
 
             cudaCheckError(cudaMemcpy(devicevoltage, hostvoltage, remread * sizeof(unsigned char), cudaMemcpyHostToDevice));
@@ -701,7 +710,7 @@ int main(int argc, char *argv[]) {
         #### ****/
         // NOTE: Factor of 4 to account for 2 polarisations and complex components for every time sample
         for (auto &dadastream: dadastreams) {
-            dadastream.close();
+            dadastream -> close();
         }
 
         filfile.close();
